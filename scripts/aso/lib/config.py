@@ -108,10 +108,28 @@ class Config:
 
     @property
     def secret_names(self) -> Dict[str, str]:
-        return self.raw["secrets"]
+        """Map of logical secret key → env-var name.
+
+        Defaults to the canonical env-var names used by the shared
+        ``VoodooStudios/aso-automation`` GH Action. Per-game configs only
+        need to override this if running outside the shared Action with
+        non-standard env-var names.
+        """
+        return {**_DEFAULT_SECRET_NAMES, **(self.raw.get("secrets") or {})}
 
 
-_REQUIRED_TOP_KEYS = ("game", "stores", "icon", "versioning", "build", "scenario", "aso_content", "secrets")
+_DEFAULT_SECRET_NAMES: Dict[str, str] = {
+    "scenario_api_key":     "SCENARIO_API_KEY",
+    "circleci_token":       "CIRCLECI_TOKEN",
+    "asc_key_id":           "ASC_KEY_ID",
+    "asc_private_key_p8":   "ASC_PRIVATE_KEY_P8",
+    "google_play_sa_json":  "GOOGLE_PLAY_SA_JSON",
+    "anthropic_api_key":    "ANTHROPIC_API_KEY",
+    "github_token":         "GITHUB_TOKEN",
+}
+
+# 'secrets' is optional — defaults above cover the shared-action env-var names.
+_REQUIRED_TOP_KEYS = ("game", "stores", "icon", "versioning", "build", "scenario", "aso_content")
 
 
 def load(repo_root: Path | str, config_filename: str = "aso-automation.config.yml") -> Config:
