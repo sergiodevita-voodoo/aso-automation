@@ -236,10 +236,11 @@ def _run(args, cfg, log, state: _RunState) -> int:
         poll_interval_seconds=cfg.scenario["poll_interval_seconds"],
         poll_timeout_minutes=cfg.scenario["poll_timeout_minutes"],
     )
-    # Reference image = the largest current icon variant on disk (1024×1024).
+    # Reference image = the largest current icon variant on disk (path comes
+    # from the per-game config, derived from icon.paths_to_overwrite).
     # We use the post-Step-3 repo state but the icons haven't been overwritten
     # yet, so this is the LIVE icon shipped in the last release.
-    ref_icon = repo_root / "Assets/Icons/UI_icon_1024.png"
+    ref_icon = cfg.reference_icon_path
     with tempfile.TemporaryDirectory(prefix="aso-icon-") as tmp:
         master_png = Path(tmp) / f"master_{cfg.icon_master_size}.png"
         scenario.run_workflow_icons(reference_image=ref_icon, destination=master_png)
@@ -348,9 +349,9 @@ def _run(args, cfg, log, state: _RunState) -> int:
 
         # Upload the new icon to the Play Store *listing* (separate asset from
         # the launcher icon baked into the AAB). Play requires 512×512 PNG.
-        # Source: Assets/Icons/UI_icon_1024.png (just overwritten by Step 5).
+        # Source: the per-game reference icon path (just overwritten by Step 5).
         from PIL import Image as _PILImage
-        src_1024 = repo_root / "Assets/Icons/UI_icon_1024.png"
+        src_1024 = cfg.reference_icon_path
         with tempfile.TemporaryDirectory(prefix="aso-play-icon-") as itmp:
             store_icon_512 = Path(itmp) / "store_icon_512.png"
             _PILImage.open(src_1024).resize((512, 512), _PILImage.LANCZOS).save(store_icon_512, "PNG")

@@ -79,6 +79,28 @@ class Config:
         return [IconPath(p["path"], int(p["size"])) for p in self.raw["icon"]["paths_to_overwrite"]]
 
     @property
+    def reference_icon_path(self) -> Path:
+        """Path (relative to repo root, returned absolute) to the icon used
+        BOTH as the reference for the Scenario workflow AND as the source
+        for the Google Play Store-listing 512×512 icon.
+
+        Resolution order:
+        1. ``icon.reference_path`` if explicitly set in the config.
+        2. The largest entry in ``icon.paths_to_overwrite``.
+
+        We pick the largest because Play requires a 512×512 store icon, and
+        the iOS reference image quality scales with input size.
+        """
+        explicit = self.raw["icon"].get("reference_path")
+        if explicit:
+            return self.repo_root / explicit
+        paths = self.icon_paths
+        if not paths:
+            raise ValueError("icon.paths_to_overwrite is empty — no reference icon available")
+        largest = max(paths, key=lambda p: p.size)
+        return self.repo_root / largest.path
+
+    @property
     def project_settings_file(self) -> Path:
         return self.repo_root / self.raw["versioning"]["project_settings_file"]
 
