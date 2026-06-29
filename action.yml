@@ -1,0 +1,75 @@
+name: 'PGT ASO Monthly Automation'
+description: 'Monthly ASO automation for PGT games — fresh icon (Scenario workflow) + What''s New (Claude) → App Store + Google Play, with auto-rollback on failure.'
+author: 'Voodoo / PGT'
+
+inputs:
+  scenario-api-key:
+    description: 'Scenario API key (api_xxx:secret_yyy combined)'
+    required: true
+  circleci-token:
+    description: 'CircleCI Personal Access Token (CCIPAT_*)'
+    required: true
+  asc-key-id:
+    description: 'App Store Connect API key ID'
+    required: true
+  asc-private-key:
+    description: 'App Store Connect .p8 private key contents (multiline including BEGIN/END markers)'
+    required: true
+  google-play-sa-json:
+    description: 'Google Play Service Account JSON contents'
+    required: true
+  anthropic-api-key:
+    description: 'Anthropic API key (for What''s New generation)'
+    required: true
+  github-token:
+    description: 'GitHub token (use ${{ secrets.GITHUB_TOKEN }})'
+    required: true
+  dry-run:
+    description: 'If "true", generate assets + commit locally but skip push / CI / store actions'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+        cache-dependency-path: ${{ github.action_path }}/scripts/aso/requirements.txt
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r ${{ github.action_path }}/scripts/aso/requirements.txt
+
+    - name: Run ASO automation
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        # ── Secrets passed through to the orchestrator ────────────────────
+        SCENARIO_API_KEY:     ${{ inputs.scenario-api-key }}
+        CIRCLECI_TOKEN:       ${{ inputs.circleci-token }}
+        ASC_KEY_ID:           ${{ inputs.asc-key-id }}
+        ASC_PRIVATE_KEY_P8:   ${{ inputs.asc-private-key }}
+        GOOGLE_PLAY_SA_JSON:  ${{ inputs.google-play-sa-json }}
+        ANTHROPIC_API_KEY:    ${{ inputs.anthropic-api-key }}
+        GITHUB_TOKEN:         ${{ inputs.github-token }}
+        LOG_LEVEL: INFO
+        # ── Path so the orchestrator finds the lib package ───────────────
+        PYTHONPATH: ${{ github.action_path }}
+        # ── Tells text_generator where to find prompt + PDFs (action root) ─
+        ASO_AUTOMATION_ROOT: ${{ github.action_path }}
+      run: |
+        DRY_RUN_FLAG=""
+        if [ "${{ inputs.dry-run }}" = "true" ]; then
+          DRY_RUN_FLAG="--dry-run"
+          echo "::warning::Running in DRY RUN mode — no push, no CI, no store push"
+        fi
+        python ${{ github.action_path }}/scripts/aso/run.py --repo-root "${{ github.workspace }}" $DRY_RUN_FLAG
+
+branding:
+  icon: 'refresh-cw'
+  color: 'blue'

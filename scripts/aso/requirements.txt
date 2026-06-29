@@ -1,0 +1,12 @@
+# Python dependencies for the monthly ASO automation.
+# Pinned by major version to avoid surprise breakage.
+
+PyYAML==6.*           # Config loading
+requests==2.*         # HTTP for Scenario, CircleCI, GitHub APIs
+Pillow==10.*          # Icon resizing
+PyJWT==2.*            # JWT for App Store Connect API
+cryptography==42.*    # ES256 signing backing for PyJWT
+google-auth==2.*      # Service account auth for Google Play Developer API
+google-api-python-client==2.*  # Play Developer API client
+tenacity==8.*         # Retry decorator for flaky API calls
+anthropic==0.*        # Claude API client (used by text_generator.claude mode)

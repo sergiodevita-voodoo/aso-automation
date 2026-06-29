@@ -1,0 +1,120 @@
+"""Read and mutate Unity's ``ProjectSettings/ProjectSettings.asset``.
+
+The file is YAML-shaped but Unity uses tags that PyYAML can't safely round-trip
+(custom tags like ``!u!129 &1`` on the document header, and the file is
+extremely position-sensitive — Unity will re-import the project when the
+file mtime changes). To stay safe we do **targeted line edits** by regex,
+preserving everything else byte-for-byte.
+
+Only three fields are mutated by the automation:
+- ``bundleVersion``                  → patch-bumped (e.g. 4.17 → 4.17.1)
+- ``buildNumber.iPhone`` (sub-key)   → incremented by 1
+- ``AndroidBundleVersionCode``        → incremented by 1
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Tuple
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class VersionState:
+    bundle_version: str          # e.g. "4.17.1"
+    android_code: int            # e.g. 68
+    ios_build_number: int        # e.g. 1
+
+
+# Regexes anchored to the indentation Unity actually uses, to avoid matching
+# similar keys in nested blocks.
+_BUNDLE_VERSION_RE = re.compile(r"^(\s*bundleVersion:\s*)(.+?)\s*$", re.MULTILINE)
+_ANDROID_CODE_RE = re.compile(r"^(\s*AndroidBundleVersionCode:\s*)(-?\d+)\s*$", re.MULTILINE)
+_BUILD_NUMBER_BLOCK_RE = re.compile(
+    r"^(\s*buildNumber:\s*\n(?:\s+[^\n]+\n)*?)(\s+iPhone:\s*)(\d+)(\s*\n)",
+    re.MULTILINE,
+)
+
+
+def read_current(project_settings_path: Path) -> VersionState:
+    """Parse the current bundleVersion / AndroidBundleVersionCode / buildNumber.iPhone.
+
+    Tolerates Unity's two-segment shorthand (e.g. ``4.17``) by treating it as
+    ``4.17.0`` for semver purposes — the file content stays ``4.17`` until the
+    next patch bump writes ``4.17.1``.
+    """
+    text = project_settings_path.read_text(encoding="utf-8")
+
+    bv_match = _BUNDLE_VERSION_RE.search(text)
+    if not bv_match:
+        raise ValueError(f"bundleVersion not found in {project_settings_path}")
+    bundle_version = bv_match.group(2).strip().strip('"').strip("'")
+
+    code_match = _ANDROID_CODE_RE.search(text)
+    if not code_match:
+        raise ValueError(f"AndroidBundleVersionCode not found in {project_settings_path}")
+    android_code = int(code_match.group(2))
+
+    bn_match = _BUILD_NUMBER_BLOCK_RE.search(text)
+    if not bn_match:
+        raise ValueError(f"buildNumber.iPhone not found in {project_settings_path}")
+    ios_build_number = int(bn_match.group(3))
+
+    return VersionState(bundle_version=bundle_version, android_code=android_code, ios_build_number=ios_build_number)
+
+
+def bump_patch(current: VersionState) -> VersionState:
+    """Return a new VersionState with bundleVersion patch-bumped and both build numbers +1.
+
+    Semver rules:
+    - "4.17"      → "4.17.1"     (two-segment → treat as .0 implicitly, write .1)
+    - "4.17.0"    → "4.17.1"
+    - "4.17.5"    → "4.17.6"
+    - "4"         → "4.0.1"      (degenerate, but handled)
+    """
+    return VersionState(
+        bundle_version=_patch_bump(current.bundle_version),
+        android_code=current.android_code + 1,
+        ios_build_number=current.ios_build_number + 1,
+    )
+
+
+def write(project_settings_path: Path, next_state: VersionState) -> None:
+    """Write the three mutations back to the file. Idempotent if values already match."""
+    text = project_settings_path.read_text(encoding="utf-8")
+
+    text, n1 = _BUNDLE_VERSION_RE.subn(rf"\g<1>{next_state.bundle_version}", text, count=1)
+    if n1 != 1:
+        raise ValueError("Failed to substitute bundleVersion")
+
+    text, n2 = _ANDROID_CODE_RE.subn(rf"\g<1>{next_state.android_code}", text, count=1)
+    if n2 != 1:
+        raise ValueError("Failed to substitute AndroidBundleVersionCode")
+
+    text, n3 = _BUILD_NUMBER_BLOCK_RE.subn(
+        rf"\g<1>\g<2>{next_state.ios_build_number}\g<4>", text, count=1
+    )
+    if n3 != 1:
+        raise ValueError("Failed to substitute buildNumber.iPhone")
+
+    project_settings_path.write_text(text, encoding="utf-8")
+    log.info(
+        "ProjectSettings.asset updated → bundleVersion=%s, AndroidBundleVersionCode=%d, buildNumber.iPhone=%d",
+        next_state.bundle_version, next_state.android_code, next_state.ios_build_number,
+    )
+
+
+def _patch_bump(version: str) -> str:
+    parts = version.split(".")
+    # Pad to at least three segments before bumping the last one.
+    while len(parts) < 3:
+        parts.append("0")
+    try:
+        parts[-1] = str(int(parts[-1]) + 1)
+    except ValueError as exc:
+        raise ValueError(f"Cannot patch-bump non-numeric version segment in '{version}'") from exc
+    return ".".join(parts)

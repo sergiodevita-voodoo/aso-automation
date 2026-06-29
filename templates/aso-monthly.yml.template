@@ -1,0 +1,50 @@
+name: ASO monthly update
+
+# Monthly ASO automation for {{game_name}}.
+# Runs the shared PGT action — code lives at VoodooStudios/aso-automation.
+# Pin to a tag (v1) so updates land in a controlled way.
+
+on:
+  schedule:
+    - cron: "0 9 1 * *"          # 1st of each month, 09:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — generate assets + commit locally, skip CI / stores"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+# Prevent overlapping runs.
+concurrency:
+  group: aso-monthly
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Run PGT ASO automation
+        uses: VoodooStudios/aso-automation@v1
+        with:
+          scenario-api-key:    ${{ secrets.SCENARIO_API_KEY }}
+          circleci-token:      ${{ secrets.CIRCLECI_TOKEN }}
+          asc-key-id:          ${{ secrets.ASC_KEY_ID }}
+          asc-private-key:     ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          google-play-sa-json: ${{ secrets.GOOGLE_PLAY_SA_JSON }}
+          anthropic-api-key:   ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token:        ${{ secrets.GITHUB_TOKEN }}
+          dry-run:             ${{ github.event.inputs.dry_run || 'false' }}

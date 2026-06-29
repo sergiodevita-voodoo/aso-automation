@@ -1,0 +1,114 @@
+# Per-game configuration for the PGT ASO monthly automation.
+#
+# This file lives at the ROOT of each PGT game's repo. Every game's automation
+# runs the SAME shared action (VoodooStudios/aso-automation@v1) against this
+# config — the orchestrator code is game-agnostic; only the values below differ.
+#
+# Placeholders in {{double_braces}} are filled by the pgt-setup-aso-automation
+# skill at onboarding time.
+
+# ─── Game identity ─────────────────────────────────────────────────────────────
+game:
+  name: "{{game_name}}"
+  slug: "{{game_slug}}"
+  code: "{{game_code}}"
+  repo_url: "{{repo_url}}"
+  default_branch: "{{default_branch}}"      # "main" or "master" — PGT convention is "main"
+  integration_branch: "develop"             # always develop for PGT
+  release_branch_pattern: "release/{version}"
+  ticket_placeholder: "[{{game_code}}-AUTO]"
+
+# ─── Stores ────────────────────────────────────────────────────────────────────
+stores:
+  ios:
+    bundle_id: "{{ios_bundle_id}}"
+    apple_app_id: "{{apple_app_id}}"        # ASC numeric app ID
+    apple_team_id: "TSKBEM2B5G"             # Voodoo's shared Apple team
+    primary_locale: "en-US"
+  android:
+    package_name: "{{android_package_name}}"
+    primary_locale: "en-US"
+
+# ─── Icon assets ───────────────────────────────────────────────────────────────
+# Every path listed below gets overwritten in place each month with the icon
+# Scenario produced (resized to the matching `size`). The .meta sidecars are
+# preserved so Unity's asset GUIDs stay stable.
+#
+# Two common layouts:
+#   (A) Per-size variants (DribbleHoops style): 20 paths, one per icon size
+#   (B) Single master + Unity auto-resize (Balls Go High style): 1 path
+icon:
+  master_source_size: 1024                  # Scenario output is always 1024×1024
+  paths_to_overwrite:
+{{icon_paths_yaml}}
+
+# ─── Versioning ────────────────────────────────────────────────────────────────
+versioning:
+  project_settings_file: "{{project_settings_file}}"
+
+# ─── Build (CircleCI via vs-ci-deployer) ───────────────────────────────────────
+build:
+  circleci_project: "gh/VoodooTeam/vs-ci-deployer"
+  circleci_config_branch: "{{circleci_config_branch}}"   # feature/<Game>_<UnityVer>
+  poll_interval_seconds: 30
+  poll_timeout_minutes: 180
+  deploy_to_store: true
+  is_proxy_build: true
+  is_lz4hc: true
+  android_keystore_name: "{{android_keystore_name}}"
+
+# ─── Scenario AI workflow ──────────────────────────────────────────────────────
+# Single shared workflow across all PGT games. Every per-node parameter is read
+# LIVE from the workflow at run-time so any UI change Sergio makes (instruction
+# text, models, thinking level, etc.) is picked up on the next run automatically.
+scenario:
+  project_id: "proj_8kF6ow4YfgAbNirPJ9frRhaV"
+  workflow_id: "wflow_zaYJkzUzWmKogBwZK1hwmJub"
+  poll_interval_seconds: 3
+  poll_timeout_minutes: 15
+
+# ─── ASO text generation (Claude) ──────────────────────────────────────────────
+aso_content:
+  mode: "claude"
+  placeholder:
+    en-US: "🏀 Fresh look this month! Tap in."
+  claude:
+    model: "claude-sonnet-4-6"
+    system_prompt_file: "scripts/aso/prompts/aso_system_prompt.md"   # resolved against action_path
+    knowledge_files:
+      - "scripts/aso/prompts/ASO_Store_images_Captions.pdf"
+      - "scripts/aso/prompts/ASO_Update_texts.pdf"
+    game_inputs:
+      game_name: "{{game_name}}"
+      game_genre: "{{game_genre}}"
+      graphical_style: "{{graphical_style}}"
+      target_audience: "{{target_audience}}"
+      store_tone: "{{store_tone}}"
+      update_goal: "re-engagement"
+    monthly_update_context: |
+      This is the monthly app refresh. DO NOT mention the icon or any visual
+      change — the icon update is silent. Focus only on:
+      - General performance and stability improvements
+      - The same satisfying gameplay loop
+      - A fresh reason for lapsed players to come back this month
+    force_version: "A"
+
+# ─── Schedule ──────────────────────────────────────────────────────────────────
+schedule:
+  cron_utc: "0 9 1 * *"                     # 1st of each month at 09:00 UTC
+
+# ─── Notifications ─────────────────────────────────────────────────────────────
+notifications:
+  slack_channel: "{{slack_channel}}"        # e.g. #pgt-balls-go-high
+
+# ─── Commit metadata ───────────────────────────────────────────────────────────
+commit_prefix: "[{{game_code}}-AUTO]"
+
+# ─── Secret names (values live in GH org-level secrets) ────────────────────────
+secret_names:
+  scenario_api_key:    "SCENARIO_API_KEY"
+  circleci_token:      "CIRCLECI_TOKEN"
+  asc_key_id:          "ASC_KEY_ID"
+  asc_private_key_p8:  "ASC_PRIVATE_KEY_P8"
+  google_play_sa_json: "GOOGLE_PLAY_SA_JSON"
+  anthropic_api_key:   "ANTHROPIC_API_KEY"
