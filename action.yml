@@ -22,7 +22,7 @@ inputs:
     description: 'Anthropic API key (for What''s New generation)'
     required: true
   github-token:
-    description: 'GitHub token (use ${{ secrets.GITHUB_TOKEN }})'
+    description: 'GitHub token — pass secrets.GITHUB_TOKEN from the caller workflow'
     required: true
   dry-run:
     description: 'If "true", generate assets + commit locally but skip push / CI / store actions'
