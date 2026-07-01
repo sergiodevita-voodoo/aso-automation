@@ -80,6 +80,33 @@ class GooglePlayClient:
         ).execute()
 
     # ── Internal → Production promotion ───────────────────────────────────
+    def get_max_version_code(self, edit_id: str) -> int:
+        """Return the highest AAB versionCode ever uploaded across ALL tracks
+        (production, beta, alpha, internal, plus any custom closed tracks).
+
+        Play rejects an AAB whose versionCode is <= any previously uploaded
+        code, so we use this as the source of truth for the next code to write
+        into ProjectSettings.asset. Any drift between develop's local counter
+        and what's on Play (from manual uploads, CI post-build patchers,
+        parallel release branches, or hotfixes) is transparently absorbed.
+        """
+        client = self._client()
+        tracks = client.edits().tracks().list(packageName=self.package_name, editId=edit_id).execute().get("tracks", [])
+        codes: List[int] = []
+        for t in tracks:
+            for r in t.get("releases", []):
+                for c in (r.get("versionCodes") or []):
+                    try:
+                        codes.append(int(c))
+                    except (TypeError, ValueError):
+                        pass
+        if not codes:
+            log.warning("Play returned no versionCodes across any track — the app has never had an AAB uploaded")
+            return 0
+        m = max(codes)
+        log.info("Play max versionCode across all tracks = %d", m)
+        return m
+
     def get_latest_internal_version_codes(self, edit_id: str) -> List[int]:
         """Return the version codes of the latest release on the Internal track.
 

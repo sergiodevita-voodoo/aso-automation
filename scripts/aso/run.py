@@ -213,6 +213,55 @@ def _run(args, cfg, log, state: _RunState) -> int:
     log.info("[2/10] Version bump (read from %s)", cfg.integration_branch)
     current_state = unity_settings.read_current(cfg.project_settings_file)
     next_state = unity_settings.bump_patch(current_state)
+
+    # Store-driven build-number reconciliation.
+    # The develop counter can lag behind the stores (manual uploads, CI
+    # post-build patchers, hotfixes on other branches). Play/ASC reject any
+    # upload whose code is <= a previously used one, so we take:
+    #   android_code    = max(local+1, Play_max+1)
+    #   ios_build_num   = max(local+1, ASC_max+1)
+    # bundleVersion (semver string) stays derived from ProjectSettings —
+    # we don't want to accidentally downgrade if develop is intentionally
+    # ahead of production (e.g. major version prep on a "3.0" branch).
+    try:
+        _play_probe = googleplay_client.GooglePlayClient(
+            sa_json=config.secret(cfg.secret_names["google_play_sa_json"]),
+            package_name=cfg.android_package_name,
+        )
+        _edit = _play_probe.open_edit()
+        try:
+            play_max = _play_probe.get_max_version_code(_edit)
+        finally:
+            _play_probe.delete_edit(_edit)
+        if play_max + 1 > next_state.android_code:
+            log.info("  Play max versionCode (%d) is ahead of develop counter (%d) — snapping android_code to %d",
+                     play_max, current_state.android_code, play_max + 1)
+            next_state = unity_settings.VersionState(
+                bundle_version=next_state.bundle_version,
+                android_code=play_max + 1,
+                ios_build_number=next_state.ios_build_number,
+            )
+    except Exception as e:
+        log.warning("Play max versionCode probe failed (%s) — falling back to develop counter + 1", e)
+
+    try:
+        _asc_probe = appstoreconnect_client.AppStoreConnectClient(
+            key_id=config.secret(cfg.secret_names["asc_key_id"]),
+            private_key_p8=config.secret(cfg.secret_names["asc_private_key_p8"]),
+            app_id=cfg.apple_app_id,
+        )
+        asc_max = _asc_probe.get_max_build_number()
+        if asc_max + 1 > next_state.ios_build_number:
+            log.info("  ASC max buildNumber (%d) is ahead of develop counter (%d) — snapping ios_build_number to %d",
+                     asc_max, current_state.ios_build_number, asc_max + 1)
+            next_state = unity_settings.VersionState(
+                bundle_version=next_state.bundle_version,
+                android_code=next_state.android_code,
+                ios_build_number=asc_max + 1,
+            )
+    except Exception as e:
+        log.warning("ASC max buildNumber probe failed (%s) — falling back to develop counter + 1", e)
+
     new_version = next_state.bundle_version
     log.info("  %s → %s   |   AndroidBundleVersionCode %d → %d   |   iOS build #%d → #%d",
              current_state.bundle_version, next_state.bundle_version,

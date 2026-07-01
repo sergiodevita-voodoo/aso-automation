@@ -111,6 +111,47 @@ class AppStoreConnectClient:
         return resp
 
     # ── Build lookup ──────────────────────────────────────────────────────
+    def get_max_build_number(self) -> int:
+        """Return the highest buildNumber ever uploaded to this app in ASC
+        across TestFlight + App Store (all versionStrings).
+
+        ASC rejects a build whose ``version`` (build number) is <= any
+        previously uploaded build for the same app, so we treat this as the
+        source of truth for the next buildNumber to write into
+        ProjectSettings.asset. Absorbs drift from manual uploads, parallel
+        release branches, and CI post-build patchers.
+        """
+        # Page through /v1/builds sorted by -version. Apple caps limit at 200
+        # per page; the first page's first row will be the max since we sort
+        # descending on version. But 'version' is a string that Apple sorts
+        # lexicographically ("10" < "9"), so we must fetch a batch and pick
+        # the numeric max ourselves.
+        params = {
+            "filter[app]": self.app_id,
+            "sort": "-uploadedDate",
+            "limit": 200,
+            "fields[builds]": "version,uploadedDate",
+        }
+        resp = self._request("GET", "/v1/builds", params=params)
+        resp.raise_for_status()
+        builds = resp.json().get("data", [])
+        if not builds:
+            log.warning("ASC returned no builds for app %s — the app has never had an .ipa uploaded", self.app_id)
+            return 0
+        numeric = []
+        for b in builds:
+            v = b.get("attributes", {}).get("version")
+            try:
+                numeric.append(int(v))
+            except (TypeError, ValueError):
+                pass
+        if not numeric:
+            log.warning("ASC returned %d builds but none had a parseable numeric build number", len(builds))
+            return 0
+        m = max(numeric)
+        log.info("ASC max build number across all versions = %d", m)
+        return m
+
     def find_build(self, version_string: str, build_number: str, poll_timeout_minutes: int = 60, poll_interval_seconds: int = 60) -> str:
         """Poll until the matching uploaded build is visible in ASC, returns its build id.
 
