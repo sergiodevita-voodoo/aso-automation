@@ -223,66 +223,92 @@ def _run(args, cfg, log, state: _RunState) -> int:
     # bundleVersion (semver string) stays derived from ProjectSettings —
     # we don't want to accidentally downgrade if develop is intentionally
     # ahead of production (e.g. major version prep on a "3.0" branch).
+    # Each probe is isolated so one failing store call doesn't cancel another's
+    # successful result. Real observed case: DR's ASC key had read scope for
+    # /v1/builds (buildNumber snap worked) but returned 403 on
+    # /v1/appStoreVersions (versionString snap failed). Under the old grouped
+    # try/except the successful buildNumber snap was lost too.
+    _play_client = None
+    _play_edit = None
     try:
-        _play_probe = googleplay_client.GooglePlayClient(
+        _play_client = googleplay_client.GooglePlayClient(
             sa_json=config.secret(cfg.secret_names["google_play_sa_json"]),
             package_name=cfg.android_package_name,
         )
-        _edit = _play_probe.open_edit()
-        try:
-            play_max = _play_probe.get_max_version_code(_edit)
-            play_max_name = _play_probe.get_max_version_name(_edit)
-        finally:
-            _play_probe.delete_edit(_edit)
-        if play_max + 1 > next_state.android_code:
-            log.info("  Play max versionCode (%d) is ahead of develop counter (%d) — snapping android_code to %d",
-                     play_max, current_state.android_code, play_max + 1)
-            next_state = unity_settings.VersionState(
-                bundle_version=next_state.bundle_version,
-                android_code=play_max + 1,
-                ios_build_number=next_state.ios_build_number,
-            )
-        # bundleVersion reconciliation against Play
-        if unity_settings.semver_gt(play_max_name, next_state.bundle_version):
-            snapped = unity_settings._patch_bump(play_max_name)
-            log.info("  Play max versionName (%s) is ahead of proposed %s — snapping bundleVersion to %s",
-                     play_max_name, next_state.bundle_version, snapped)
-            next_state = unity_settings.VersionState(
-                bundle_version=snapped,
-                android_code=next_state.android_code,
-                ios_build_number=next_state.ios_build_number,
-            )
+        _play_edit = _play_client.open_edit()
     except Exception as e:
-        log.warning("Play version probes failed (%s) — falling back to develop counter + 1", e)
+        log.warning("Play edit open failed (%s) — skipping both Play snaps", e)
 
+    if _play_client is not None and _play_edit is not None:
+        try:
+            play_max = _play_client.get_max_version_code(_play_edit)
+            if play_max + 1 > next_state.android_code:
+                log.info("  Play max versionCode (%d) is ahead of develop counter (%d) — snapping android_code to %d",
+                         play_max, current_state.android_code, play_max + 1)
+                next_state = unity_settings.VersionState(
+                    bundle_version=next_state.bundle_version,
+                    android_code=play_max + 1,
+                    ios_build_number=next_state.ios_build_number,
+                )
+        except Exception as e:
+            log.warning("Play max versionCode probe failed (%s) — keeping local+1", e)
+
+        try:
+            play_max_name = _play_client.get_max_version_name(_play_edit)
+            if unity_settings.semver_gt(play_max_name, next_state.bundle_version):
+                snapped = unity_settings._patch_bump(play_max_name)
+                log.info("  Play max versionName (%s) is ahead of proposed %s — snapping bundleVersion to %s",
+                         play_max_name, next_state.bundle_version, snapped)
+                next_state = unity_settings.VersionState(
+                    bundle_version=snapped,
+                    android_code=next_state.android_code,
+                    ios_build_number=next_state.ios_build_number,
+                )
+        except Exception as e:
+            log.warning("Play max versionName probe failed (%s) — keeping local bundleVersion", e)
+
+        try:
+            _play_client.delete_edit(_play_edit)
+        except Exception as e:
+            log.warning("Play edit cleanup failed (%s) — will auto-expire in 24h", e)
+
+    _asc_client = None
     try:
-        _asc_probe = appstoreconnect_client.AppStoreConnectClient(
+        _asc_client = appstoreconnect_client.AppStoreConnectClient(
             key_id=config.secret(cfg.secret_names["asc_key_id"]),
             private_key_p8=config.secret(cfg.secret_names["asc_private_key_p8"]),
             app_id=cfg.apple_app_id,
         )
-        asc_max = _asc_probe.get_max_build_number()
-        asc_max_ver = _asc_probe.get_max_version_string()
-        if asc_max + 1 > next_state.ios_build_number:
-            log.info("  ASC max buildNumber (%d) is ahead of develop counter (%d) — snapping ios_build_number to %d",
-                     asc_max, current_state.ios_build_number, asc_max + 1)
-            next_state = unity_settings.VersionState(
-                bundle_version=next_state.bundle_version,
-                android_code=next_state.android_code,
-                ios_build_number=asc_max + 1,
-            )
-        # bundleVersion reconciliation against ASC
-        if unity_settings.semver_gt(asc_max_ver, next_state.bundle_version):
-            snapped = unity_settings._patch_bump(asc_max_ver)
-            log.info("  ASC max versionString (%s) is ahead of proposed %s — snapping bundleVersion to %s",
-                     asc_max_ver, next_state.bundle_version, snapped)
-            next_state = unity_settings.VersionState(
-                bundle_version=snapped,
-                android_code=next_state.android_code,
-                ios_build_number=next_state.ios_build_number,
-            )
     except Exception as e:
-        log.warning("ASC version probes failed (%s) — falling back to develop counter + 1", e)
+        log.warning("ASC client init failed (%s) — skipping both ASC snaps", e)
+
+    if _asc_client is not None:
+        try:
+            asc_max = _asc_client.get_max_build_number()
+            if asc_max + 1 > next_state.ios_build_number:
+                log.info("  ASC max buildNumber (%d) is ahead of develop counter (%d) — snapping ios_build_number to %d",
+                         asc_max, current_state.ios_build_number, asc_max + 1)
+                next_state = unity_settings.VersionState(
+                    bundle_version=next_state.bundle_version,
+                    android_code=next_state.android_code,
+                    ios_build_number=asc_max + 1,
+                )
+        except Exception as e:
+            log.warning("ASC max buildNumber probe failed (%s) — keeping local+1", e)
+
+        try:
+            asc_max_ver = _asc_client.get_max_version_string()
+            if unity_settings.semver_gt(asc_max_ver, next_state.bundle_version):
+                snapped = unity_settings._patch_bump(asc_max_ver)
+                log.info("  ASC max versionString (%s) is ahead of proposed %s — snapping bundleVersion to %s",
+                         asc_max_ver, next_state.bundle_version, snapped)
+                next_state = unity_settings.VersionState(
+                    bundle_version=snapped,
+                    android_code=next_state.android_code,
+                    ios_build_number=next_state.ios_build_number,
+                )
+        except Exception as e:
+            log.warning("ASC max versionString probe failed (%s) — keeping local bundleVersion", e)
 
     new_version = next_state.bundle_version
     log.info("  %s → %s   |   AndroidBundleVersionCode %d → %d   |   iOS build #%d → #%d",
