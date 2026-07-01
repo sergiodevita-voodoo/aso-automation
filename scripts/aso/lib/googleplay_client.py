@@ -107,6 +107,32 @@ class GooglePlayClient:
         log.info("Play max versionCode across all tracks = %d", m)
         return m
 
+    def get_max_version_name(self, edit_id: str) -> str:
+        """Return the highest release *name* (versionName) ever set across ALL
+        tracks. Parsed as semver; ties broken by string comparison.
+
+        Play's ``release.name`` shape varies — sometimes ``"2.9.53"``,
+        sometimes ``"111 (2.9.17)"``. Both parse cleanly via
+        ``unity_settings._parse_semver``.
+        """
+        from scripts.aso.lib import unity_settings  # local import — avoid circular
+        client = self._client()
+        tracks = client.edits().tracks().list(packageName=self.package_name, editId=edit_id).execute().get("tracks", [])
+        names = []
+        for t in tracks:
+            for r in t.get("releases", []):
+                n = r.get("name")
+                if n:
+                    names.append(n)
+        if not names:
+            return "0.0.0"
+        # Sort by parsed semver tuple, take the last (highest)
+        names.sort(key=lambda n: unity_settings._parse_semver(n))
+        best = names[-1]
+        canonical = unity_settings.format_semver(best)
+        log.info("Play max release name across all tracks = %r → semver %s", best, canonical)
+        return canonical
+
     def get_latest_internal_version_codes(self, edit_id: str) -> List[int]:
         """Return the version codes of the latest release on the Internal track.
 

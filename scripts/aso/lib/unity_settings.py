@@ -118,3 +118,47 @@ def _patch_bump(version: str) -> str:
     except ValueError as exc:
         raise ValueError(f"Cannot patch-bump non-numeric version segment in '{version}'") from exc
     return ".".join(parts)
+
+
+def _parse_semver(s: str) -> tuple[int, ...]:
+    """Extract the semver-shaped ``X.Y[.Z[.…]]`` tail from an arbitrary string
+    and return it as a tuple of ints (padded to 3 segments so comparisons are
+    total).
+
+    Handles all the shapes Play and ASC emit:
+      "2.4.7"                → (2, 4, 7)
+      "2470000 (2.4.7)"      → (2, 4, 7)
+      "1.9.14"               → (1, 9, 14)
+      "3.12.33"              → (3, 12, 33)
+    Returns ``(0, 0, 0)`` if nothing parseable was found — callers should
+    treat that as "no useful signal, keep the local bump".
+    """
+    import re
+    matches = re.findall(r"\d+(?:\.\d+)+", s or "")
+    if not matches:
+        return (0, 0, 0)
+    parts = matches[-1].split(".")
+    ints = []
+    for p in parts:
+        try:
+            ints.append(int(p))
+        except ValueError:
+            ints.append(0)
+    while len(ints) < 3:
+        ints.append(0)
+    return tuple(ints)
+
+
+def semver_gt(a: str, b: str) -> bool:
+    """Return True iff semver ``a`` > semver ``b`` under (major, minor, patch)
+    integer comparison. Used to decide whether to snap bundleVersion upward
+    to match a store's live release."""
+    return _parse_semver(a) > _parse_semver(b)
+
+
+def format_semver(s: str) -> str:
+    """Return the parsed semver as a canonical ``X.Y.Z`` string. Only used
+    when snapping bundleVersion to a store max — we canonicalize so
+    downstream regex substitutions have a predictable input."""
+    ints = _parse_semver(s)
+    return ".".join(str(i) for i in ints)

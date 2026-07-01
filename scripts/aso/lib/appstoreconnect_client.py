@@ -152,6 +152,34 @@ class AppStoreConnectClient:
         log.info("ASC max build number across all versions = %d", m)
         return m
 
+    def get_max_version_string(self) -> str:
+        """Return the highest ``appStoreVersions.versionString`` ever created
+        for this app, parsed as semver. Covers TestFlight + App Store; both
+        share the versionString space.
+
+        Used as the source of truth for bundleVersion — a new iOS version
+        can only be created with a versionString strictly > every prior
+        version, so we snap develop upward when the store is ahead.
+        """
+        from scripts.aso.lib import unity_settings  # local import — avoid circular
+        params = {
+            "filter[app]": self.app_id,
+            "limit": 200,
+            "fields[appStoreVersions]": "versionString",
+        }
+        resp = self._request("GET", "/v1/appStoreVersions", params=params)
+        resp.raise_for_status()
+        versions = resp.json().get("data", [])
+        strings = [v.get("attributes", {}).get("versionString") for v in versions if v.get("attributes", {}).get("versionString")]
+        if not strings:
+            log.warning("ASC returned no appStoreVersions for app %s", self.app_id)
+            return "0.0.0"
+        strings.sort(key=lambda s: unity_settings._parse_semver(s))
+        best = strings[-1]
+        canonical = unity_settings.format_semver(best)
+        log.info("ASC max versionString across all versions = %r → semver %s", best, canonical)
+        return canonical
+
     def find_build(self, version_string: str, build_number: str, poll_timeout_minutes: int = 60, poll_interval_seconds: int = 60) -> str:
         """Poll until the matching uploaded build is visible in ASC, returns its build id.
 
