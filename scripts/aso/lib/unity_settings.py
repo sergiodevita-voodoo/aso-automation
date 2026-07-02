@@ -130,14 +130,32 @@ def _parse_semver(s: str) -> tuple[int, ...]:
       "2470000 (2.4.7)"      → (2, 4, 7)
       "1.9.14"               → (1, 9, 14)
       "3.12.33"              → (3, 12, 33)
+      "52100091 (5.21.9) - new VS 8.8.5"
+                             → (5, 21, 9)   ← parenthesized version wins over
+                                              trailing SDK-version annotation
     Returns ``(0, 0, 0)`` if nothing parseable was found — callers should
     treat that as "no useful signal, keep the local bump".
+
+    Resolution order:
+      1. Semver inside parentheses  ``\\((X.Y[.Z])\\)``  — Play's canonical
+         format is ``"<code> (<name>)"``, and any annotations trail the
+         parens. Preferring this handles Helix Jump's
+         ``"52100091 (5.21.9) - new VS 8.8.5"`` correctly.
+      2. Last semver-shape match anywhere in the string — fallback for
+         games that emit just ``"1.9.14"`` with no wrapper.
     """
     import re
-    matches = re.findall(r"\d+(?:\.\d+)+", s or "")
-    if not matches:
+    if not s:
         return (0, 0, 0)
-    parts = matches[-1].split(".")
+    paren = re.findall(r"\((\d+(?:\.\d+)+)\)", s)
+    if paren:
+        chosen = paren[-1]
+    else:
+        matches = re.findall(r"\d+(?:\.\d+)+", s)
+        if not matches:
+            return (0, 0, 0)
+        chosen = matches[-1]
+    parts = chosen.split(".")
     ints = []
     for p in parts:
         try:

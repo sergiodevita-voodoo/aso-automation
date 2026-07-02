@@ -36,6 +36,13 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
+
+
+class _SkipDeterministic(Exception):
+    """Sentinel to short-circuit the deterministic Play/ASC snap block when
+    Opus versioning already produced authoritative numbers."""
+    pass
 
 # Make lib package importable regardless of cwd
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -214,6 +221,60 @@ def _run(args, cfg, log, state: _RunState) -> int:
     current_state = unity_settings.read_current(cfg.project_settings_file)
     next_state = unity_settings.bump_patch(current_state)
 
+    # Optional Opus-driven versioning — opt-in per game via
+    # `versioning.strategy: opus` in aso-automation.config.yml. When set,
+    # skip the deterministic snap block entirely and hand Opus the full
+    # local + Play + ASC picture; it returns the three next-version numbers
+    # and a reasoning line. Falls back to deterministic on any Opus failure.
+    strategy = str(cfg.raw.get("versioning", {}).get("strategy", "deterministic")).lower()
+    opus_won = False
+    if strategy == "opus":
+        from scripts.aso.lib import opus_versioning
+        log.info("  versioning.strategy = opus — asking Opus for next version identifiers")
+        # Gather the picture Opus needs
+        try:
+            _play = googleplay_client.GooglePlayClient(
+                sa_json=config.secret(cfg.secret_names["google_play_sa_json"]),
+                package_name=cfg.android_package_name,
+            )
+            _e = _play.open_edit()
+            try:
+                _tr = _play._client().edits().tracks().list(
+                    packageName=cfg.android_package_name, editId=_e
+                ).execute().get("tracks", [])
+            finally:
+                try: _play.delete_edit(_e)
+                except Exception: pass
+        except Exception as e:
+            log.warning("  Opus versioning: could not fetch Play tracks (%s)", e)
+            _tr = []
+        try:
+            _asc = appstoreconnect_client.AppStoreConnectClient(
+                key_id=config.secret(cfg.secret_names["asc_key_id"]),
+                private_key_p8=config.secret(cfg.secret_names["asc_private_key_p8"]),
+                app_id=cfg.apple_app_id,
+            )
+            _asc_bn: Optional[int] = None
+            _asc_vs: Optional[str] = None
+            try: _asc_bn = _asc.get_max_build_number()
+            except Exception as e: log.warning("  Opus versioning: ASC buildNumber probe failed: %s", e)
+            try: _asc_vs = _asc.get_max_version_string()
+            except Exception as e: log.warning("  Opus versioning: ASC versionString probe failed: %s", e)
+        except Exception:
+            _asc_bn = None; _asc_vs = None
+        opus_state = opus_versioning.decide_next_state(
+            game_name=cfg.game_name, game_code=cfg.game_code,
+            local_state=current_state,
+            play_tracks=_tr,
+            asc_max_build_number=_asc_bn,
+            asc_max_version_string=_asc_vs,
+        )
+        if opus_state is not None:
+            next_state = opus_state
+            opus_won = True
+        else:
+            log.info("  Opus versioning fallback — using deterministic path")
+
     # Store-driven build-number reconciliation.
     # The develop counter can lag behind the stores (manual uploads, CI
     # post-build patchers, hotfixes on other branches). Play/ASC reject any
@@ -230,12 +291,18 @@ def _run(args, cfg, log, state: _RunState) -> int:
     # try/except the successful buildNumber snap was lost too.
     _play_client = None
     _play_edit = None
+    if opus_won:
+        log.info("  Opus versioning decided the numbers — skipping deterministic store snaps")
     try:
+        if opus_won:
+            raise _SkipDeterministic()
         _play_client = googleplay_client.GooglePlayClient(
             sa_json=config.secret(cfg.secret_names["google_play_sa_json"]),
             package_name=cfg.android_package_name,
         )
         _play_edit = _play_client.open_edit()
+    except _SkipDeterministic:
+        pass
     except Exception as e:
         log.warning("Play edit open failed (%s) — skipping both Play snaps", e)
 
@@ -274,11 +341,15 @@ def _run(args, cfg, log, state: _RunState) -> int:
 
     _asc_client = None
     try:
+        if opus_won:
+            raise _SkipDeterministic()
         _asc_client = appstoreconnect_client.AppStoreConnectClient(
             key_id=config.secret(cfg.secret_names["asc_key_id"]),
             private_key_p8=config.secret(cfg.secret_names["asc_private_key_p8"]),
             app_id=cfg.apple_app_id,
         )
+    except _SkipDeterministic:
+        pass
     except Exception as e:
         log.warning("ASC client init failed (%s) — skipping both ASC snaps", e)
 
