@@ -174,6 +174,15 @@ def semver_gt(a: str, b: str) -> bool:
     return _parse_semver(a) > _parse_semver(b)
 
 
+def semver_gte(a: str, b: str) -> bool:
+    """Return True iff semver ``a`` >= semver ``b`` under (major, minor, patch)
+    integer comparison. Preferred over ``semver_gt`` for the store-drift
+    snap: ASC + Play both reject a new appStoreVersion / release whose
+    versionString equals a previously shipped one, so we must snap upward
+    whenever the store max is >= our proposed value (not just strictly >)."""
+    return _parse_semver(a) >= _parse_semver(b)
+
+
 def format_semver(s: str) -> str:
     """Return the parsed semver as a canonical ``X.Y.Z`` string. Only used
     when snapping bundleVersion to a store max — we canonicalize so

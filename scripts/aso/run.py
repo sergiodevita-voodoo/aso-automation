@@ -322,9 +322,9 @@ def _run(args, cfg, log, state: _RunState) -> int:
 
         try:
             play_max_name = _play_client.get_max_version_name(_play_edit)
-            if unity_settings.semver_gt(play_max_name, next_state.bundle_version):
+            if unity_settings.semver_gte(play_max_name, next_state.bundle_version):
                 snapped = unity_settings._patch_bump(play_max_name)
-                log.info("  Play max versionName (%s) is ahead of proposed %s — snapping bundleVersion to %s",
+                log.info("  Play max versionName (%s) is at or ahead of proposed %s — snapping bundleVersion to %s",
                          play_max_name, next_state.bundle_version, snapped)
                 next_state = unity_settings.VersionState(
                     bundle_version=snapped,
@@ -369,9 +369,9 @@ def _run(args, cfg, log, state: _RunState) -> int:
 
         try:
             asc_max_ver = _asc_client.get_max_version_string()
-            if unity_settings.semver_gt(asc_max_ver, next_state.bundle_version):
+            if unity_settings.semver_gte(asc_max_ver, next_state.bundle_version):
                 snapped = unity_settings._patch_bump(asc_max_ver)
-                log.info("  ASC max versionString (%s) is ahead of proposed %s — snapping bundleVersion to %s",
+                log.info("  ASC max versionString (%s) is at or ahead of proposed %s — snapping bundleVersion to %s",
                          asc_max_ver, next_state.bundle_version, snapped)
                 next_state = unity_settings.VersionState(
                     bundle_version=snapped,
