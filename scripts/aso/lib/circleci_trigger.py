@@ -1,34 +1,28 @@
-"""Trigger CircleCI pipelines on ``VoodooTeam/vs-ci-deployer`` and poll their status.
+"""Trigger CircleCI pipelines and poll their status.
 
-The exact pipeline parameter shape was reverse-engineered from
-``Assets/Scripts/Editor/LaunchCIBuildEditorWindow.cs`` — the in-Editor build
-launcher that has been working for the PGT team for months. We just replicate
-its POST body and run it from CI instead of a developer's machine.
+Two provider shapes supported:
 
-Pipeline parameters (sourced from LaunchCIBuildEditorWindow.cs ~line 320):
+  * ``VsCiDeployerTrigger`` — the legacy provider. Triggers pipelines on the
+    shared ``VoodooTeam/vs-ci-deployer`` project. Each game has a per-game
+    config branch (``feature/<GameName>_<UnityVersion>``) and a Game-Config
+    JSON. Pipeline runs iOS and Android as TWO separate triggers with ~12
+    parameters each (repository_path, repository_branch, build_number,
+    project-version, upload-comment, deployment-type, deploy-build-to-store,
+    is_proxy_build, is-lz4hc, plus per-platform bundle/keystore/trigger flags).
 
-    Common:
-        repository_path        — GitHub URL of the game repo
-        repository_branch      — branch in the game repo to build
-        build_number           — opaque tracking number
-        project-version        — version string written to the build
-        upload-comment         — note attached to the build
-        deployment-type        — "release"
-        deploy-build-to-store  — true to push past TestFlight/Internal track
-        is_proxy_build         — true (always, per the existing flow)
-        is-lz4hc               — true (always, per the existing flow)
+  * ``VgciTrigger`` — the new default provider (Voodoo Game CI). Triggers a
+    pipeline directly on the game repo's own CircleCI project
+    (``VoodooStudios/<game-repo>``) against the release branch we just
+    pushed. Single pipeline with ``platform: all`` handles both iOS +
+    Android. Only 5 parameters: workflow_type, platform, pipeline_preset,
+    comment, inject_tunables. Version bumping, build numbering, and store
+    deployment are all controlled by the game repo's ``ci.yml`` + the
+    ``voodoosauce-ci`` orb, driven by the ``pipeline_preset`` enum
+    (``release_store`` | ``internal_no_deploy`` | ``dev_firebase``).
 
-    iOS extra:
-        repository_bundle_id            — iOS bundle id
-        manual-trigger-ios              — true
-        manual-trigger-ios-testflight   — true
-        enable-pod-cache                — true
-
-    Android extra:
-        repository_bundle_id              — Android package name
-        manual-trigger-android-deployment — true
-        android-keystore                  — keystore filename
-        enable-caching                    — true
+The provider is chosen per game via ``build.provider`` in
+``aso-automation.config.yml``. Default is ``"vgci"``; legacy games must
+explicitly set ``provider: vs-ci-deployer``.
 """
 
 from __future__ import annotations
@@ -47,47 +41,14 @@ _CIRCLECI_BASE = "https://circleci.com/api/v2"
 
 
 @dataclass
-class CircleCITrigger:
+class _BaseTrigger:
+    """Shared pipeline-polling logic. Both providers post pipelines and then
+    wait for them by polling ``/pipeline/{id}/workflow`` — that part is
+    identical, so we hoist it here."""
+
     token: str                          # CircleCI Personal API Token
-    project_slug: str                   # e.g. "gh/VoodooTeam/vs-ci-deployer"
-    deployer_config_branch: str         # vs-ci-deployer branch holding the per-game config
     poll_interval_seconds: int = 60
     poll_timeout_minutes: int = 90
-
-    # ───────────────────────────────────────────────────────────────────────
-    def trigger_ios(self, common: Dict[str, Any], bundle_id: str) -> str:
-        params = {
-            **common,
-            "repository_bundle_id": bundle_id,
-            "manual-trigger-ios": True,
-            "manual-trigger-ios-testflight": True,
-            "enable-pod-cache": True,
-        }
-        return self._post_pipeline(params)
-
-    def trigger_android(self, common: Dict[str, Any], package_name: str, keystore: str) -> str:
-        params = {
-            **common,
-            "repository_bundle_id": package_name,
-            "manual-trigger-android-deployment": True,
-            "android-keystore": keystore,
-            "enable-caching": True,
-        }
-        return self._post_pipeline(params)
-
-    # ───────────────────────────────────────────────────────────────────────
-    @retry(stop=stop_after_attempt(5), wait=wait_exponential(min=2, max=20))
-    def _post_pipeline(self, parameters: Dict[str, Any]) -> str:
-        url = f"{_CIRCLECI_BASE}/project/{self.project_slug}/pipeline"
-        body = {"branch": self.deployer_config_branch, "parameters": parameters}
-        resp = requests.post(url, json=body, headers={"Circle-Token": self.token}, timeout=30)
-        if resp.status_code != 201:
-            raise RuntimeError(f"CircleCI trigger failed {resp.status_code}: {resp.text[:300]}")
-        pipeline_id = resp.json().get("id")
-        if not pipeline_id:
-            raise RuntimeError(f"CircleCI trigger response missing 'id': {resp.text[:300]}")
-        log.info("CircleCI pipeline triggered: %s (params: %s)", pipeline_id, _redact(parameters))
-        return pipeline_id
 
     # ───────────────────────────────────────────────────────────────────────
     def wait_for_pipeline(self, pipeline_id: str) -> str:
@@ -110,20 +71,13 @@ class CircleCITrigger:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
     def _get_pipeline_state(self, pipeline_id: str) -> str:
-        """Aggregate the workflow states for a pipeline into one summary state.
-
-        CircleCI's data model is: pipeline → workflows → jobs. A pipeline is
-        considered "success" only when all its workflows succeed, "failed"
-        if any workflow ends in a non-success terminal state, and otherwise
-        still "running".
-        """
+        """Aggregate workflow states for a pipeline into one summary state."""
         url = f"{_CIRCLECI_BASE}/pipeline/{pipeline_id}/workflow"
         resp = requests.get(url, headers={"Circle-Token": self.token}, timeout=30)
         resp.raise_for_status()
         workflows = resp.json().get("items", [])
         if not workflows:
-            return "running"   # No workflows yet — still spinning up.
-
+            return "running"
         states = {w["status"] for w in workflows}
         terminal_bad = {"failed", "errored", "canceled", "cancelled", "unauthorized"}
         if states & terminal_bad:
@@ -131,6 +85,89 @@ class CircleCITrigger:
         if states == {"success"}:
             return "success"
         return "running"
+
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(min=2, max=20))
+    def _post_pipeline(self, project_slug: str, branch: str, parameters: Dict[str, Any]) -> str:
+        url = f"{_CIRCLECI_BASE}/project/{project_slug}/pipeline"
+        body = {"branch": branch, "parameters": parameters}
+        resp = requests.post(url, json=body, headers={"Circle-Token": self.token}, timeout=30)
+        if resp.status_code != 201:
+            raise RuntimeError(f"CircleCI trigger failed {resp.status_code}: {resp.text[:300]}")
+        pipeline_id = resp.json().get("id")
+        if not pipeline_id:
+            raise RuntimeError(f"CircleCI trigger response missing 'id': {resp.text[:300]}")
+        log.info("CircleCI pipeline triggered: %s (project=%s branch=%s params=%s)",
+                 pipeline_id, project_slug, branch, _redact(parameters))
+        return pipeline_id
+
+
+@dataclass
+class VsCiDeployerTrigger(_BaseTrigger):
+    """Legacy provider: shared ``VoodooTeam/vs-ci-deployer`` project.
+
+    iOS and Android are fired as two separate pipelines with per-platform
+    trigger flags. Kept intact for the games we've already onboarded while
+    they migrate off it.
+    """
+    project_slug: str = "gh/VoodooTeam/vs-ci-deployer"
+    deployer_config_branch: str = ""    # e.g. "feature/GameName_6000.0.72f1"
+
+    def trigger_ios(self, common: Dict[str, Any], bundle_id: str) -> str:
+        params = {
+            **common,
+            "repository_bundle_id": bundle_id,
+            "manual-trigger-ios": True,
+            "manual-trigger-ios-testflight": True,
+            "enable-pod-cache": True,
+        }
+        return self._post_pipeline(self.project_slug, self.deployer_config_branch, params)
+
+    def trigger_android(self, common: Dict[str, Any], package_name: str, keystore: str) -> str:
+        params = {
+            **common,
+            "repository_bundle_id": package_name,
+            "manual-trigger-android-deployment": True,
+            "android-keystore": keystore,
+            "enable-caching": True,
+        }
+        return self._post_pipeline(self.project_slug, self.deployer_config_branch, params)
+
+
+@dataclass
+class VgciTrigger(_BaseTrigger):
+    """New default provider: game-repo-native ``voodoosauce-ci`` orb.
+
+    Triggers a single pipeline on ``gh/VoodooStudios/<game-repo>`` against the
+    release branch we just pushed. The ``pipeline_preset`` enum selects the
+    build type + per-platform deploy targets (``release_store`` deploys to
+    App Store + Play; ``internal_no_deploy`` builds without shipping;
+    ``dev_firebase`` deploys development builds to Firebase).
+    """
+    project_slug: str = ""              # e.g. "gh/VoodooStudios/BallsGoHigh"
+
+    def trigger_build(
+        self,
+        *,
+        branch: str,
+        pipeline_preset: str,
+        comment: str = "",
+        platform: str = "all",
+        inject_tunables: str = "",
+    ) -> str:
+        params = {
+            "workflow_type": "unity-build",
+            "platform": platform,
+            "pipeline_preset": pipeline_preset,
+            "comment": comment,
+            "inject_tunables": inject_tunables,
+        }
+        return self._post_pipeline(self.project_slug, branch, params)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Backward-compat alias — old callers imported ``CircleCITrigger`` directly.
+# Point that name at the legacy provider so nothing breaks during migration.
+CircleCITrigger = VsCiDeployerTrigger
 
 
 def _redact(params: Dict[str, Any]) -> Dict[str, Any]:

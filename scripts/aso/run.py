@@ -444,34 +444,62 @@ def _run(args, cfg, log, state: _RunState) -> int:
     state.release_branch_pushed = release_branch
 
     # ─── Step 7: CircleCI build ────────────────────────────────────────────
-    log.info("[7/10] Trigger CircleCI iOS + Android pipelines")
-    ci = circleci_trigger.CircleCITrigger(
-        token=config.secret(cfg.secret_names["circleci_token"]),
-        project_slug=cfg.build["circleci_project"],
-        deployer_config_branch=cfg.build["circleci_config_branch"],
-        poll_interval_seconds=cfg.build["poll_interval_seconds"],
-        poll_timeout_minutes=cfg.build["poll_timeout_minutes"],
-    )
-    common = {
-        "repository_path": cfg.repo_url,
-        "repository_branch": release_branch,
-        "build_number": str(next_state.ios_build_number),
-        "project-version": new_version,
-        "upload-comment": f"Monthly ASO update — {new_version}",
-        "deployment-type": "release",
-        "deploy-build-to-store": cfg.build["deploy_to_store"],
-        "is_proxy_build": cfg.build["is_proxy_build"],
-        "is-lz4hc": cfg.build["is_lz4hc"],
-    }
-    ios_pipeline = ci.trigger_ios(common, cfg.ios_bundle_id)
-    state.ios_pipeline_id = ios_pipeline
-    android_pipeline = ci.trigger_android(common, cfg.android_package_name, cfg.build["android_keystore_name"])
-    state.android_pipeline_id = android_pipeline
+    # Provider dispatch:
+    #   vgci             → one pipeline on the game repo, platform=all
+    #   vs-ci-deployer   → two pipelines (iOS + Android) on the shared deployer
+    provider = cfg.build_provider
+    circle_token = config.secret(cfg.secret_names["circleci_token"])
 
-    log.info("[7/10] Waiting for iOS pipeline %s", ios_pipeline)
-    ci.wait_for_pipeline(ios_pipeline)
-    log.info("[7/10] Waiting for Android pipeline %s", android_pipeline)
-    ci.wait_for_pipeline(android_pipeline)
+    if provider == "vgci":
+        log.info("[7/10] Trigger VGCI pipeline (provider=vgci, platform=all)")
+        preset = (
+            cfg.build.get("pipeline_preset_deploy", "release_store")
+            if cfg.build.get("deploy_to_store", True)
+            else cfg.build.get("pipeline_preset_no_deploy", "internal_no_deploy")
+        )
+        ci = circleci_trigger.VgciTrigger(
+            token=circle_token,
+            project_slug=cfg.build["circleci_project"],
+            poll_interval_seconds=cfg.build.get("poll_interval_seconds", 60),
+            poll_timeout_minutes=cfg.build.get("poll_timeout_minutes", 180),
+        )
+        vgci_pipeline = ci.trigger_build(
+            branch=release_branch,
+            pipeline_preset=preset,
+            comment=f"Monthly ASO update — {new_version}",
+            platform="all",
+        )
+        state.ios_pipeline_id = vgci_pipeline  # single pipeline; store under ios slot for the state file
+        log.info("[7/10] Waiting for VGCI pipeline %s (preset=%s)", vgci_pipeline, preset)
+        ci.wait_for_pipeline(vgci_pipeline)
+    else:
+        log.info("[7/10] Trigger vs-ci-deployer pipelines (provider=vs-ci-deployer, iOS + Android)")
+        ci = circleci_trigger.VsCiDeployerTrigger(
+            token=circle_token,
+            project_slug=cfg.build["circleci_project"],
+            deployer_config_branch=cfg.build["circleci_config_branch"],
+            poll_interval_seconds=cfg.build.get("poll_interval_seconds", 60),
+            poll_timeout_minutes=cfg.build.get("poll_timeout_minutes", 180),
+        )
+        common = {
+            "repository_path": cfg.repo_url,
+            "repository_branch": release_branch,
+            "build_number": str(next_state.ios_build_number),
+            "project-version": new_version,
+            "upload-comment": f"Monthly ASO update — {new_version}",
+            "deployment-type": "release",
+            "deploy-build-to-store": cfg.build["deploy_to_store"],
+            "is_proxy_build": cfg.build["is_proxy_build"],
+            "is-lz4hc": cfg.build["is_lz4hc"],
+        }
+        ios_pipeline = ci.trigger_ios(common, cfg.ios_bundle_id)
+        state.ios_pipeline_id = ios_pipeline
+        android_pipeline = ci.trigger_android(common, cfg.android_package_name, cfg.build["android_keystore_name"])
+        state.android_pipeline_id = android_pipeline
+        log.info("[7/10] Waiting for iOS pipeline %s", ios_pipeline)
+        ci.wait_for_pipeline(ios_pipeline)
+        log.info("[7/10] Waiting for Android pipeline %s", android_pipeline)
+        ci.wait_for_pipeline(android_pipeline)
 
     # ─── Step 8: ASC version + What's New ──────────────────────────────────
     log.info("[8/10] App Store Connect — version + What's New")

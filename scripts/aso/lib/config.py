@@ -121,6 +121,17 @@ class Config:
         return self.raw["build"]
 
     @property
+    def build_provider(self) -> str:
+        """CI provider selector — determines which CircleCI shape run.py's
+        step 7 uses. ``"vgci"`` (default) triggers the game repo's own
+        ``voodoosauce-ci`` orb; ``"vs-ci-deployer"`` triggers legacy pipelines
+        on the shared ``VoodooTeam/vs-ci-deployer`` project."""
+        v = str(self.raw.get("build", {}).get("provider", "vgci")).lower()
+        if v not in ("vgci", "vs-ci-deployer"):
+            raise ValueError(f"Unknown build.provider {v!r} — must be 'vgci' or 'vs-ci-deployer'")
+        return v
+
+    @property
     def scenario(self) -> Dict[str, Any]:
         return self.raw["scenario"]
 
