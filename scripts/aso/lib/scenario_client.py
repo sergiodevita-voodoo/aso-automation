@@ -212,13 +212,22 @@ class ScenarioClient:
         without maintaining a hardcoded mapping table.
         """
         def _maybe_corrected_modelid(error_msg: str) -> Optional[str]:
-            # Handles BOTH error-string variants Scenario produces:
+            # Handles the error-string variants Scenario produces:
             #   "Input should be one of: 'X', 'Y', 'Z'"
             #   "Input should be 'X', 'Y' or 'Z'"
             #   "must be one of the following values: 'X', 'Y' or 'Z'"
+            #   "Select a supported model from the available options: 'X', 'Y', ... or 'Z'"
+            # `.` matches any char except newline by default; `.+?` lazy grabs
+            # up to the terminator alternatives. Terminators cover: literal
+            # ``\n`` in a JSON string, closing quote, sentence-ending period
+            # followed by a space, or end of string.
             patterns = [
-                r"Input should be(?:\s*one of)?:?\s*([^\\\n]+?)(?:\\n|\"|$)",
-                r"must be one of the following values:?\s*([^\\\n]+?)(?:\\n|\"|$)",
+                r"Input should be(?:\s+one of)?:?\s*(.+?)(?:\\n|\"|\. |$)",
+                r"must be one of the following values:?\s*(.+?)(?:\\n|\"|\. |$)",
+                r"Select a supported model from the available options:?\s*(.+?)(?:\\n|\"|\. |$)",
+                r"Select one of the supported models:?\s*(.+?)(?:\\n|\"|\. |$)",
+                r"supported models?:?\s*(.+?)(?:\\n|\"|\. |$)",
+                r"available options:?\s*(.+?)(?:\\n|\"|\. |$)",
             ]
             m = None
             for p in patterns:
@@ -230,8 +239,14 @@ class ScenarioClient:
             opts_raw = m.group(1)
             # Split on commas / "or" / "and"
             raw = re.split(r"\s*,\s*|\s+or\s+|\s+and\s+", opts_raw)
-            options = [o.strip().strip("'\"`. ").rstrip(".") for o in raw]
-            options = [o for o in options if o and not o.lower().startswith("input")]
+            options = []
+            for o in raw:
+                s = o.strip().strip("'\"`. ").rstrip(".")
+                # Strip a leading "or " / "and " that survived the split
+                # (happens with the ", or 'X'" pattern where comma wins first)
+                s = re.sub(r"^(?:or|and)\s+['\"`]?", "", s, flags=re.IGNORECASE).strip("'\"`. ")
+                if s and not s.lower().startswith("input"):
+                    options.append(s)
             if not options:
                 return None
             current = body.get("modelId", "")
@@ -285,13 +300,16 @@ class ScenarioClient:
             if st in ("success", "succeeded", "completed"):
                 return j
             if st in ("failure", "failed", "canceled", "cancelled", "error"):
-                # Surface the server's actual error message (often in
-                # metadata.error) at the start of the RuntimeError so
-                # downstream retry logic can pattern-match cleanly.
-                err = j.get("metadata", {}).get("error") or j.get("errorMessage") or j.get("reason") or ""
+                # Surface the server's actual error message AND `hint` (the
+                # enum-list guidance lives there) at the start of the
+                # RuntimeError so downstream retry logic can pattern-match
+                # cleanly. Truncated metadata dropped the hint before.
+                meta = j.get("metadata", {}) or {}
+                err = meta.get("error") or j.get("errorMessage") or j.get("reason") or ""
+                hint = meta.get("hint") or ""
                 raise RuntimeError(
                     f"Scenario [{label}] job {job_id} FAILED — error={err!r} — "
-                    f"metadata={_json.dumps(j.get('metadata', {}))[:400]}"
+                    f"hint={hint!r} — metadata={_json.dumps(meta)[:400]}"
                 )
             time.sleep(self.poll_interval_seconds)
         raise TimeoutError(f"Scenario [{label}] job {job_id} timed out after {self.poll_timeout_minutes} min")
@@ -394,12 +412,14 @@ def _guess_body_model_id(url_path: str) -> str:
     """Best-effort first guess of the body-form `modelId` from the URL-form
     one stored on the workflow node. Pattern observed on Scenario:
 
-        model_google-gemini-3-1-flash   →  gemini-3-1-flash   (then retry adds -image)
+        model_google-gemini-3-1-flash   →  gemini-3-1-flash
+              (Scenario later renamed the body form to ``gemini-3.1-flash-image``
+              — retry catches this via enum-error parsing, no static map here)
         model_openai-gpt-image-2        →  gpt-image-2
         model_scenario-llm              →  model_scenario-llm  (no change)
         flux.1-dev                      →  flux.1-dev          (already bare)
 
-    If the first guess fails, ``_post_job_with_modelid_retry`` parses the
+    If the first guess fails, ``_post_and_wait_with_modelid_retry`` parses the
     server's enum error and picks the closest valid option.
     """
     if not url_path.startswith("model_"):
@@ -415,7 +435,16 @@ def _guess_body_model_id(url_path: str) -> str:
 
 
 def _closest_match(candidate: str, options: List[str]) -> Optional[str]:
-    """Return the option whose normalized form best overlaps with `candidate`."""
+    """Return the option whose normalized form best overlaps with `candidate`.
+
+    Scoring:
+      - +100 if candidate is a normalized substring of the option (best signal)
+      - +50 if option is a normalized substring of candidate
+      - +char-set overlap
+      - length-delta acts as a tiebreaker (smaller = better) so we prefer
+        e.g. ``gemini-3.1-flash-image`` over ``gemini-3.1-flash-lite-image``
+        when the candidate is ``gemini-3-1-flash``.
+    """
     if not options:
         return None
     def norm(s: str) -> str:
@@ -424,11 +453,12 @@ def _closest_match(candidate: str, options: List[str]) -> Optional[str]:
     scored = []
     for o in options:
         no = norm(o)
-        # token overlap as a quick proxy
         common = sum(1 for ch in set(nc) if ch in no)
-        # prefer options that contain the candidate's full normalized form as a substring
         boost = 100 if nc and nc in no else 0
         boost += 50 if no and no in nc else 0
-        scored.append((boost + common, o))
-    scored.sort(reverse=True)
-    return scored[0][1] if scored else None
+        # Length-delta penalty (0-49 range so it doesn't overpower boosts)
+        len_delta = abs(len(no) - len(nc))
+        # (score DESC, len_delta ASC, option string ASC) — deterministic tiebreak
+        scored.append((-(boost + common), len_delta, o))
+    scored.sort()
+    return scored[0][2] if scored else None
