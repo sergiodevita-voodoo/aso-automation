@@ -28,6 +28,10 @@ inputs:
     description: 'If "true", generate assets + commit locally but skip push / CI / store actions'
     required: false
     default: 'false'
+  smoke-test:
+    description: 'If "true", push + CI (build lands on TestFlight + Play Internal) then STOP before ASC submit + Play promote. Use to validate a new provider without any store-facing writes.'
+    required: false
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -61,12 +65,16 @@ runs:
         # ── Tells text_generator where to find prompt + PDFs (action root) ─
         ASO_AUTOMATION_ROOT: ${{ github.action_path }}
       run: |
-        DRY_RUN_FLAG=""
+        FLAGS=""
         if [ "${{ inputs.dry-run }}" = "true" ]; then
-          DRY_RUN_FLAG="--dry-run"
+          FLAGS="$FLAGS --dry-run"
           echo "::warning::Running in DRY RUN mode — no push, no CI, no store push"
         fi
-        python ${{ github.action_path }}/scripts/aso/run.py --repo-root "${{ github.workspace }}" $DRY_RUN_FLAG
+        if [ "${{ inputs.smoke-test }}" = "true" ]; then
+          FLAGS="$FLAGS --smoke-test"
+          echo "::warning::Running in SMOKE TEST mode — push + CI runs (build lands on TestFlight + Play Internal), then STOP. No ASC submit, no Play promote."
+        fi
+        python ${{ github.action_path }}/scripts/aso/run.py --repo-root "${{ github.workspace }}" $FLAGS
 
 branding:
   icon: 'refresh-cw'

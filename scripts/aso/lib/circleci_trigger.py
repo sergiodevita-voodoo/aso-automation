@@ -163,6 +163,31 @@ class VgciTrigger(_BaseTrigger):
         }
         return self._post_pipeline(self.project_slug, branch, params)
 
+    @staticmethod
+    def build_inject_tunables(*, version_number: str, ios_build_number: int, android_build_number: int) -> str:
+        """Build the ``inject_tunables`` string that overrides VGCI's default
+        auto-bump behavior with explicit values.
+
+        The orb's default is to auto-bump both versionName and build numbers
+        from a global registry — which loses the store-drift + Opus logic
+        this orchestrator does upstream. Passing explicit tunables makes the
+        orb use our exact numbers instead.
+
+        Format: comma-separated `"key":"value"` pairs (JSON-fragment shape;
+        NOT a full JSON object). Values are always strings — the orb's
+        template parses them into typed values.
+        """
+        parts = [
+            f'"version_number":"{version_number}"',
+            f'"ios_build_number":"{ios_build_number}"',
+            f'"android_build_number":"{android_build_number}"',
+            '"auto_bump_version":"false"',
+            '"auto_bump_build":"false"',
+            '"continuous_build_number":"false"',
+            '"sync_build_numbers":"false"',
+        ]
+        return ",".join(parts)
+
 
 # ───────────────────────────────────────────────────────────────────────────
 # Backward-compat alias — old callers imported ``CircleCITrigger`` directly.

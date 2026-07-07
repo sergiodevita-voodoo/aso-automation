@@ -142,6 +142,10 @@ class _RunState:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Monthly ASO automation orchestrator")
     parser.add_argument("--dry-run", action="store_true", help="Generate assets + commit locally, skip push / CI / stores")
+    parser.add_argument("--smoke-test", action="store_true",
+                        help="Run through push + CI (build lands on TestFlight + Play Internal), "
+                             "then STOP before ASC submit-for-review and Play internal→production promotion. "
+                             "Use to validate a new provider (e.g. VGCI) without any store-facing publication.")
     parser.add_argument("--repo-root", default=str(_SCRIPT_DIR.parent.parent), help="Path to the game repo root")
     args = parser.parse_args()
 
@@ -152,7 +156,7 @@ def main() -> int:
     log = logging.getLogger("aso.run")
 
     cfg = config.load(args.repo_root)
-    log.info("ASO automation starting for %s (%s) — dry_run=%s", cfg.game_name, cfg.game_code, args.dry_run)
+    log.info("ASO automation starting for %s (%s) — dry_run=%s smoke_test=%s", cfg.game_name, cfg.game_code, args.dry_run, args.smoke_test)
 
     state = _RunState()
     asc_client_for_rollback = None
@@ -463,11 +467,24 @@ def _run(args, cfg, log, state: _RunState) -> int:
             poll_interval_seconds=cfg.build.get("poll_interval_seconds", 60),
             poll_timeout_minutes=cfg.build.get("poll_timeout_minutes", 180),
         )
+        # Force the orb to use OUR computed versions instead of its default
+        # auto-bump (which parses ProjectSettings.asset as semver and picks
+        # the next value from a global registry — see the SIA resolve_versions
+        # log). The store-drift snap + optional Opus have already produced
+        # the right values in next_state; inject_tunables tells the orb to
+        # trust them.
+        tunables = circleci_trigger.VgciTrigger.build_inject_tunables(
+            version_number=new_version,
+            ios_build_number=next_state.ios_build_number,
+            android_build_number=next_state.android_code,
+        )
+        log.info("  inject_tunables: %s", tunables)
         vgci_pipeline = ci.trigger_build(
             branch=release_branch,
             pipeline_preset=preset,
             comment=f"Monthly ASO update — {new_version}",
             platform="all",
+            inject_tunables=tunables,
         )
         state.ios_pipeline_id = vgci_pipeline  # single pipeline; store under ios slot for the state file
         log.info("[7/10] Waiting for VGCI pipeline %s (preset=%s)", vgci_pipeline, preset)
@@ -500,6 +517,18 @@ def _run(args, cfg, log, state: _RunState) -> int:
         ci.wait_for_pipeline(ios_pipeline)
         log.info("[7/10] Waiting for Android pipeline %s", android_pipeline)
         ci.wait_for_pipeline(android_pipeline)
+
+    # ─── SMOKE-TEST short-circuit ─────────────────────────────────────────
+    # If --smoke-test was passed, we've validated push + CI + upload to
+    # TestFlight + Play Internal. Stop here — do NOT create ASC version,
+    # submit for review, or promote to production. The uploaded artifacts
+    # sit on TestFlight + Play Internal exactly as if a human had done a
+    # normal internal build. This is the safe way to validate a new
+    # provider (e.g. VGCI) without touching store-facing state.
+    if args.smoke_test:
+        log.warning("SMOKE TEST — CI succeeded. Build lands on TestFlight + Play Internal.")
+        log.warning("SMOKE TEST — stopping before ASC submit + Play promote. No store-facing writes.")
+        return 0
 
     # ─── Step 8: ASC version + What's New ──────────────────────────────────
     log.info("[8/10] App Store Connect — version + What's New")
