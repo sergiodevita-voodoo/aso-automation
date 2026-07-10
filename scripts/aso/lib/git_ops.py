@@ -39,12 +39,22 @@ def create_release_branch(repo_root: Path, version: str, branch_pattern: str, ba
     """Create a release branch named per ``branch_pattern`` (e.g. ``release/{version}``)
     cut from ``base`` (typically ``develop``).
 
+    Also proactively deletes any orphan ``release/{version}`` on origin left
+    behind by a prior cancelled/failed run so the eventual push is guaranteed
+    to be a clean create. Rollback-on-failure normally handles this, but a
+    workflow that gets *cancelled* (not failed) never fires rollback, leaving
+    the release branch behind and blocking the next push with a non-fast-forward.
+
     Returns the branch name actually created.
     """
     branch = branch_pattern.replace("{version}", version)
     _run(["git", "fetch", "origin", base], cwd=repo_root)
+    # Pre-flight cleanup: nuke any orphan release/{version} on origin. Best-
+    # effort: fine if the branch doesn't exist. This automation owns the
+    # release/* namespace, so there's nothing to protect against clobbering.
+    _run(["git", "push", "origin", "--delete", branch], cwd=repo_root, check=False)
     # -B forces creation even if a prior failed run left a stale branch around
-    # locally — the prior remote state is preserved.
+    # locally.
     _run(["git", "checkout", "-B", branch, f"origin/{base}"], cwd=repo_root)
     log.info("Created branch %s from origin/%s", branch, base)
     return branch
@@ -69,7 +79,16 @@ def stage_and_commit(repo_root: Path, paths: Iterable[Path], commit_message: str
 
 
 def push_branch(repo_root: Path, branch: str) -> None:
-    """Push the current branch to origin, setting upstream."""
+    """Push the current branch to origin, setting upstream.
+
+    Handles the case where the release branch was renamed after
+    ``create_release_branch`` did its pre-flight cleanup (Step 2.5 rename in
+    run.py: the initial name is patch-bumped, then store-drift snap might
+    push the version higher, prompting a local rename to the new name). The
+    new name might have its own orphan on origin from a prior run — so we
+    best-effort delete before pushing here too.
+    """
+    _run(["git", "push", "origin", "--delete", branch], cwd=repo_root, check=False)
     _run(["git", "push", "--set-upstream", "origin", branch], cwd=repo_root)
     log.info("Pushed %s to origin", branch)
 
