@@ -25,9 +25,15 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class VersionState:
-    bundle_version: str          # e.g. "4.17.1"
-    android_code: int            # e.g. 68
-    ios_build_number: int        # e.g. 1
+    bundle_version: str          # Android versionName / Unity shared bundleVersion (semver typical, e.g. "4.17.1")
+    android_code: int            # Play versionCode (e.g. 68)
+    ios_build_number: int        # ASC buildNumber (e.g. 1)
+    # iOS CFBundleShortVersionString, kept separate because some apps ship
+    # iOS with a MONOTONIC INTEGER scheme (e.g. RopeAndDemolish: "109" → "110")
+    # while shipping Android with SEMVER (e.g. "8.31.0" → "8.31.1"). Empty
+    # string means "same as bundle_version" (back-compat for games where iOS
+    # and Android share the semver scheme — the majority).
+    ios_version_string: str = ""
 
 
 # Regexes anchored to the indentation Unity actually uses, to avoid matching
@@ -106,6 +112,42 @@ def write(project_settings_path: Path, next_state: VersionState) -> None:
         "ProjectSettings.asset updated → bundleVersion=%s, AndroidBundleVersionCode=%d, buildNumber.iPhone=%d",
         next_state.bundle_version, next_state.android_code, next_state.ios_build_number,
     )
+
+
+def detect_and_bump(current_str: str) -> str:
+    """Detect the version scheme of ``current_str`` and return the next value.
+
+    Handles:
+      "8.31.0"           → "8.31.1"     (semver)
+      "5.21.9"           → "5.21.10"    (semver, multi-digit patch)
+      "4.17"             → "4.17.1"     (short semver — treated as .0 implicit)
+      "109"              → "110"        (monotonic integer)
+      "2470001 (2.4.7)"  → "2.4.8"      (Play canonical: prefer parenthesized semver)
+      "52100091 (5.21.9) - new VS 8.8.5" → "5.21.10"  (annotations trail parens)
+
+    Raises ``ValueError`` if the string matches none of the shapes above —
+    callers must handle this (e.g. fall back to local bundleVersion).
+
+    The whole point of this helper is to let iOS and Android bump
+    independently based on what each store SHIPS, not on a per-game config
+    declaration. Rope's iOS ASC shows "109" → we emit "110"; its Play shows
+    "8.31.0" → we emit "8.31.1". Every other game defaults to semver on both
+    stores and gets the same behaviour as before.
+    """
+    s = (current_str or "").strip().strip('"').strip("'")
+    if not s:
+        raise ValueError("empty version string — cannot detect scheme")
+    # 1. Play canonical "code (semver)" → the parenthesized part
+    paren = re.findall(r"\((\d+(?:\.\d+)+)\)", s)
+    if paren:
+        return _patch_bump(paren[-1])
+    # 2. Bare semver
+    if re.match(r"^\d+(?:\.\d+)+$", s):
+        return _patch_bump(s)
+    # 3. Bare monotonic integer
+    if re.match(r"^\d+$", s):
+        return str(int(s) + 1)
+    raise ValueError(f"cannot detect version scheme from {s!r} — neither semver nor integer")
 
 
 def _patch_bump(version: str) -> str:
