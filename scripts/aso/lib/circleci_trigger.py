@@ -164,7 +164,7 @@ class VgciTrigger(_BaseTrigger):
         return self._post_pipeline(self.project_slug, branch, params)
 
     @staticmethod
-    def build_inject_tunables(*, version_number: str, ios_build_number: int, android_build_number: int) -> str:
+    def build_inject_tunables(*, version_number: str, build_number: int) -> str:
         """Build the ``inject_tunables`` string that overrides VGCI's default
         auto-bump behavior with explicit values.
 
@@ -173,14 +173,24 @@ class VgciTrigger(_BaseTrigger):
         this orchestrator does upstream. Passing explicit tunables makes the
         orb use our exact numbers instead.
 
+        NOTE ON KEY NAMING: VGCI's "Check Android/iOS build number" step reads
+        the SHARED ``build_number`` tunable, not the platform-prefixed
+        ``android_build_number`` / ``ios_build_number``. Prefixed keys resolve
+        in the internal tunables table but never propagate to the check step,
+        so passing them leaves the check reading placeholder=1 and rejecting
+        the run ("version code 1 cannot be used"). We therefore always send
+        the single shared ``build_number``. Feed it the ANDROID versionCode
+        (Int32-safe) — iOS accepts the same value because each ASO release
+        bumps the versionString, and buildNumber uniqueness in ASC is scoped
+        per-CFBundleShortVersionString.
+
         Format: comma-separated `"key":"value"` pairs (JSON-fragment shape;
         NOT a full JSON object). Values are always strings — the orb's
         template parses them into typed values.
         """
         parts = [
             f'"version_number":"{version_number}"',
-            f'"ios_build_number":"{ios_build_number}"',
-            f'"android_build_number":"{android_build_number}"',
+            f'"build_number":"{build_number}"',
             '"auto_bump_version":"false"',
             '"auto_bump_build":"false"',
             '"continuous_build_number":"false"',
