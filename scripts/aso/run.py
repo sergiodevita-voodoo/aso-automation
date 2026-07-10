@@ -386,8 +386,43 @@ def _run(args, cfg, log, state: _RunState) -> int:
             log.warning("ASC max versionString probe failed (%s) — keeping local bundleVersion", e)
 
     new_version = next_state.bundle_version
-    log.info("  %s → %s   |   AndroidBundleVersionCode %d → %d   |   iOS build #%d → #%d",
+
+    # ─── iOS version-string detection (per-platform, store-driven) ────────
+    # iOS ASC and Google Play may ship the versionString field under DIFFERENT
+    # schemes for the same game. Rope: ASC uses monotonic integer ("109"),
+    # Play uses semver ("8.31.0"). Emitting Android's semver as iOS's
+    # versionString causes Apple to lexically parse "8" < 109 → build stuck
+    # in ASC processing forever ("a later version is closed for new build
+    # submissions"), fastlane polls indefinitely.
+    #
+    # Solution: detect ASC's actual scheme from the max versionString we
+    # observed and bump per its own rules. Fall back to Android's value if
+    # the ASC probe returned nothing (permission errors, empty history).
+    ios_next_version = new_version   # default: same as Android
+    try:
+        if _asc_client is not None:
+            _asc_max_vs = _asc_client.get_max_version_string()
+            if _asc_max_vs and _asc_max_vs != "0.0.0":
+                try:
+                    ios_next_version = unity_settings.detect_and_bump(_asc_max_vs)
+                    if ios_next_version != new_version:
+                        log.info("  ASC versionString scheme detected (%s → %s) — iOS diverges from Android (%s)",
+                                 _asc_max_vs, ios_next_version, new_version)
+                except ValueError as e:
+                    log.warning("  ASC versionString scheme unrecognised (%s) — keeping bundleVersion for iOS", e)
+    except Exception as e:
+        log.warning("  ASC max versionString re-probe for iOS scheme failed (%s) — keeping bundleVersion for iOS", e)
+
+    # If Opus already set ios_version_string, honor that (Opus has the fullest
+    # picture); otherwise use our detected value.
+    if not next_state.ios_version_string:
+        import dataclasses
+        next_state = dataclasses.replace(next_state, ios_version_string=ios_next_version)
+    ios_next_version = next_state.ios_version_string or new_version
+
+    log.info("  %s → %s   |   iOS versionString %s → %s   |   AndroidBundleVersionCode %d → %d   |   iOS build #%d → #%d",
              current_state.bundle_version, next_state.bundle_version,
+             current_state.bundle_version, ios_next_version,
              current_state.android_code, next_state.android_code,
              current_state.ios_build_number, next_state.ios_build_number)
 
@@ -518,27 +553,36 @@ def _run(args, cfg, log, state: _RunState) -> int:
             poll_interval_seconds=cfg.build.get("poll_interval_seconds", 60),
             poll_timeout_minutes=cfg.build.get("poll_timeout_minutes", 180),
         )
-        common = {
+        # Base params shared by both platform triggers.
+        base_common = {
             "repository_path": cfg.repo_url,
             "repository_branch": release_branch,
             # Use the Android versionCode (Int32-safe) for the shared
-            # build_number param. The deployer applies it to both platforms;
-            # iOS ASC accepts because each ASO release bumps the versionString
-            # and buildNumber uniqueness is per-versionString on iOS. Using
-            # the iOS value here caused Int32 overflow on the Android build
-            # when ASC's timestamp-format buildNumbers exceeded 2^31-1 (real
-            # case: DrawClimber, iOS max=202503062336).
+            # build_number param. iOS ASC accepts because each ASO release
+            # bumps the versionString and buildNumber uniqueness is
+            # per-versionString on iOS. Using the iOS value here would
+            # overflow Android's Int32 versionCode when ASC uses
+            # timestamp-format buildNumbers (real case: DrawClimber).
             "build_number": str(next_state.android_code),
-            "project-version": new_version,
             "upload-comment": f"Monthly ASO update — {new_version}",
             "deployment-type": "release",
             "deploy-build-to-store": cfg.build["deploy_to_store"],
             "is_proxy_build": cfg.build["is_proxy_build"],
             "is-lz4hc": cfg.build["is_lz4hc"],
         }
-        ios_pipeline = ci.trigger_ios(common, cfg.ios_bundle_id)
+        # PER-PLATFORM VERSION STRINGS. Each store may use its own scheme.
+        # Fastlane patches Info.plist for iOS and gradle for Android using
+        # `project-version` — sending them the wrong scheme (e.g. Android's
+        # "8.31.1" to iOS with ASC history at "109") causes Apple to reject
+        # ("a later version has been closed for new build submissions").
+        ios_common = {**base_common, "project-version": ios_next_version}
+        android_common = {**base_common, "project-version": new_version}
+        if ios_next_version != new_version:
+            log.info("  Per-platform version-string split: iOS='%s'  Android='%s'",
+                     ios_next_version, new_version)
+        ios_pipeline = ci.trigger_ios(ios_common, cfg.ios_bundle_id)
         state.ios_pipeline_id = ios_pipeline
-        android_pipeline = ci.trigger_android(common, cfg.android_package_name, cfg.build["android_keystore_name"])
+        android_pipeline = ci.trigger_android(android_common, cfg.android_package_name, cfg.build["android_keystore_name"])
         state.android_pipeline_id = android_pipeline
         log.info("[7/10] Waiting for iOS pipeline %s", ios_pipeline)
         ci.wait_for_pipeline(ios_pipeline)
