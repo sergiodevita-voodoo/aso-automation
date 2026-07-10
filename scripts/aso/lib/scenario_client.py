@@ -230,8 +230,8 @@ class ScenarioClient:
                 #   "Select one of the available models: ..."   ← newest (2026-07-10)
                 # The pattern tolerates any leading "Select ..." verb + "supported"
                 # OR "available" + "models" or "options".
-                r"Select (?:a|one of)?\s*(?:the\s+)?(?:supported|available)\s+(?:models?|options?)(?:\s+from\s+the\s+(?:available|supported)\s+(?:options?|models?))?:?\s*(.+?)(?:\\n|\"|\. |$)",
-                r"(?:supported|available) (?:models?|options?):?\s*(.+?)(?:\\n|\"|\. |$)",
+                r"Select (?:a|one of)?\s*(?:the\s+)?(?:supported|available)(?:\s+\w+)?\s+(?:models?|options?)(?:\s+from\s+the\s+(?:available|supported)(?:\s+\w+)?\s+(?:options?|models?))?:?\s*(.+?)(?:\\n|\"|\. |$)",
+                r"(?:supported|available)(?:\s+\w+)?\s+(?:models?|options?):?\s*(.+?)(?:\\n|\"|\. |$)",
             ]
             m = None
             for p in patterns:
