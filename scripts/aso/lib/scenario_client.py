@@ -224,10 +224,14 @@ class ScenarioClient:
             patterns = [
                 r"Input should be(?:\s+one of)?:?\s*(.+?)(?:\\n|\"|\. |$)",
                 r"must be one of the following values:?\s*(.+?)(?:\\n|\"|\. |$)",
-                r"Select a supported model from the available options:?\s*(.+?)(?:\\n|\"|\. |$)",
-                r"Select one of the supported models:?\s*(.+?)(?:\\n|\"|\. |$)",
-                r"supported models?:?\s*(.+?)(?:\\n|\"|\. |$)",
-                r"available options:?\s*(.+?)(?:\\n|\"|\. |$)",
+                # Generic catch-all that covers every observed Scenario hint phrasing:
+                #   "Select a supported model from the available options: ..."
+                #   "Select one of the supported models: ..."
+                #   "Select one of the available models: ..."   ← newest (2026-07-10)
+                # The pattern tolerates any leading "Select ..." verb + "supported"
+                # OR "available" + "models" or "options".
+                r"Select (?:a|one of)?\s*(?:the\s+)?(?:supported|available)\s+(?:models?|options?)(?:\s+from\s+the\s+(?:available|supported)\s+(?:options?|models?))?:?\s*(.+?)(?:\\n|\"|\. |$)",
+                r"(?:supported|available) (?:models?|options?):?\s*(.+?)(?:\\n|\"|\. |$)",
             ]
             m = None
             for p in patterns:
