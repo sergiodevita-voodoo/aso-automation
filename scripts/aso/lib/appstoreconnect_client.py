@@ -237,9 +237,20 @@ class AppStoreConnectClient:
             # to their numeric value; semvers get parsed via _parse_semver. Mixed pool → sort keeps ordering
             # within each family, and callers pick per-scheme.
             def sort_key(s: str):
-                if re.match(r"^\d+$", s.strip()):
-                    return (0, int(s.strip()))
-                return (1, unity_settings._parse_semver(s))
+                # Apple's own iOS versionString comparison is a numeric-tuple
+                # compare across dot-separated segments. "109" → (109,);
+                # "8.31.1" → (8, 31, 1); 109 > 8 → integer "109" > semver
+                # "8.31.1". We use the same rule so the max we pick is what
+                # Apple considers the latest — even when a game's history
+                # contains a mix of schemes (e.g. Rope: mostly integer
+                # versions "1"…"109", plus a few polluting semver attempts
+                # our own automation submitted before this fix landed).
+                parts = s.strip().split(".")
+                try:
+                    return tuple(int(p) for p in parts)
+                except ValueError:
+                    # Fallback for pre-release-tagged versions ("1.0-rc1")
+                    return unity_settings._parse_semver(s)
             unique.sort(key=sort_key)
             best = unique[-1]
             log.info("ASC max versionString across %d builds+included (page-scanned %d) = %r (%d unique strings seen)",
