@@ -391,6 +391,23 @@ def _run(args, cfg, log, state: _RunState) -> int:
              current_state.android_code, next_state.android_code,
              current_state.ios_build_number, next_state.ios_build_number)
 
+    # ─── Step 2.5: rename release branch if step-2 snap bumped the version ─
+    # Step 1 created release/{naive-next} using a patch bump of develop's
+    # bundleVersion. If store-drift snap in Step 2 raised the version further
+    # (e.g. dev=1.9.14 → naive=1.9.15 → snap 1.9.16 because Play has 1.9.15
+    # already), the local branch name is stale. Push would then either try
+    # `release/1.9.15` (which already exists on origin from the prior real
+    # release) → non-fast-forward, or land the new commit under the wrong
+    # release name. Rename the local branch to match the final version.
+    expected_branch = cfg.release_branch_pattern.format(version=new_version)
+    if release_branch != expected_branch:
+        log.info("  Store-drift snap bumped version — renaming release branch %s → %s",
+                 release_branch, expected_branch)
+        subprocess.run(["git", "branch", "-m", release_branch, expected_branch],
+                       cwd=repo_root, check=True)
+        release_branch = expected_branch
+        state.release_branch = release_branch
+
     # ─── Step 3: write new ProjectSettings ─────────────────────────────────
     log.info("[3/10] Patch ProjectSettings.asset")
     unity_settings.write(cfg.project_settings_file, next_state)
