@@ -175,32 +175,99 @@ class AppStoreConnectClient:
         return m
 
     def get_max_version_string(self) -> str:
-        """Return the highest ``appStoreVersions.versionString`` ever created
-        for this app, parsed as semver. Covers TestFlight + App Store; both
-        share the versionString space.
+        """Return the highest versionString ever seen for this app.
 
-        Used as the source of truth for bundleVersion — a new iOS version
-        can only be created with a versionString strictly > every prior
-        version, so we snap develop upward when the store is ahead.
+        Uses ``/v1/builds?include=preReleaseVersion,appStoreVersion`` — which
+        only requires ``builds.read`` scope (the paginated buildNumber probe
+        already uses it successfully). This bypasses the older
+        ``/v1/appStoreVersions`` endpoint that many ASC keys 403 on due to
+        missing ``appStoreVersions.read`` scope. Falls back to the old
+        endpoint if the builds+include path returns nothing.
+
+        The returned string is the RAW versionString as ASC stores it —
+        e.g. ``"109"`` for apps on monotonic-integer schemes, ``"8.31.0"``
+        for apps on semver. Callers use ``unity_settings.detect_and_bump()``
+        to figure out the scheme and produce the next value; DO NOT
+        canonicalize as semver here or integer schemes get lost.
         """
-        from scripts.aso.lib import unity_settings  # local import — avoid circular
+        # Path B (preferred): walk /v1/builds + included relationships.
+        # We already page through /v1/builds in get_max_build_number, but
+        # that fetch strips relationships. Do a fresh pass here with
+        # include= so the "included" array carries the versionStrings.
+        seen_strings: List[str] = []
+        params = {
+            "filter[app]": self.app_id,
+            "limit": 200,
+            "include": "preReleaseVersion,appStoreVersion",
+            "fields[builds]": "version",
+            "fields[preReleaseVersions]": "version",
+            "fields[appStoreVersions]": "versionString",
+        }
+        page_count = 0
+        next_path: Optional[str] = None
+        try:
+            while True:
+                page_count += 1
+                if next_path is not None:
+                    resp = self._request("GET", next_path)
+                else:
+                    resp = self._request("GET", "/v1/builds", params=params)
+                resp.raise_for_status()
+                body = resp.json()
+                for inc in body.get("included", []):
+                    t = inc.get("type")
+                    attr = inc.get("attributes", {}) or {}
+                    if t == "preReleaseVersions":
+                        v = attr.get("version")
+                        if v: seen_strings.append(str(v))
+                    elif t == "appStoreVersions":
+                        v = attr.get("versionString")
+                        if v: seen_strings.append(str(v))
+                next_url = (body.get("links") or {}).get("next")
+                if not next_url or page_count >= 100: break
+                next_path = next_url.replace(_API_BASE, "")
+        except Exception as e:
+            log.warning("ASC versionString probe via /v1/builds+include failed (%s) — trying legacy /v1/appStoreVersions", e)
+
+        if seen_strings:
+            # Deduplicate + pick the one with the largest numeric-tuple representation.
+            from scripts.aso.lib import unity_settings  # local import — avoid circular
+            unique = list(dict.fromkeys(seen_strings))
+            # For sorting: integers sort numerically, semvers sort by parsed tuple. Convert integer strings
+            # to their numeric value; semvers get parsed via _parse_semver. Mixed pool → sort keeps ordering
+            # within each family, and callers pick per-scheme.
+            def sort_key(s: str):
+                if re.match(r"^\d+$", s.strip()):
+                    return (0, int(s.strip()))
+                return (1, unity_settings._parse_semver(s))
+            unique.sort(key=sort_key)
+            best = unique[-1]
+            log.info("ASC max versionString across %d builds+included (page-scanned %d) = %r (%d unique strings seen)",
+                     len(seen_strings), page_count, best, len(unique))
+            return best
+
+        # Path A (legacy fallback): the old /v1/appStoreVersions endpoint.
         params = {
             "filter[app]": self.app_id,
             "limit": 200,
             "fields[appStoreVersions]": "versionString",
         }
-        resp = self._request("GET", "/v1/appStoreVersions", params=params)
-        resp.raise_for_status()
-        versions = resp.json().get("data", [])
-        strings = [v.get("attributes", {}).get("versionString") for v in versions if v.get("attributes", {}).get("versionString")]
-        if not strings:
-            log.warning("ASC returned no appStoreVersions for app %s", self.app_id)
+        try:
+            resp = self._request("GET", "/v1/appStoreVersions", params=params)
+            resp.raise_for_status()
+            versions = resp.json().get("data", [])
+            strings = [v.get("attributes", {}).get("versionString") for v in versions if v.get("attributes", {}).get("versionString")]
+        except Exception as e:
+            log.warning("ASC legacy versionString probe also failed (%s)", e)
             return "0.0.0"
+        if not strings:
+            log.warning("ASC returned no appStoreVersions for app %s (both probes empty)", self.app_id)
+            return "0.0.0"
+        from scripts.aso.lib import unity_settings  # local import
         strings.sort(key=lambda s: unity_settings._parse_semver(s))
         best = strings[-1]
-        canonical = unity_settings.format_semver(best)
-        log.info("ASC max versionString across all versions = %r → semver %s", best, canonical)
-        return canonical
+        log.info("ASC max versionString (legacy path) across all versions = %r", best)
+        return best
 
     def find_build(self, version_string: str, build_number: str, poll_timeout_minutes: int = 60, poll_interval_seconds: int = 60) -> str:
         """Poll until the matching uploaded build is visible in ASC, returns its build id.
