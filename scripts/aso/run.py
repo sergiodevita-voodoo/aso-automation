@@ -625,12 +625,19 @@ def _run(args, cfg, log, state: _RunState) -> int:
     # version numbers) and master (so master mirrors what's actually live).
     # Best-effort — failure here doesn't roll back the stores, because the
     # release is already live there.
-    log.info("[10/11] Merge %s back into develop + master", release_branch)
+    # Merge targets = integration_branch + develop (both, if they differ).
+    # integration_branch is what release cuts from AND primary merge target;
+    # develop is the additional target so any dev work rebases cleanly.
+    # If integration_branch already == develop, targets = ["develop"] (single).
+    merge_targets = [cfg.integration_branch]
+    if cfg.integration_branch != "develop":
+        merge_targets.append("develop")
+    log.info("[10/11] Merge %s back into %s", release_branch, " + ".join(merge_targets))
     try:
         git_ops.merge_release_back(
             repo_root,
             release_branch=release_branch,
-            targets=["develop", "master"],
+            targets=merge_targets,
         )
         git_ops.delete_branch(repo_root, release_branch)
     except Exception as e:
