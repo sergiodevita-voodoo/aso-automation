@@ -113,43 +113,65 @@ class AppStoreConnectClient:
     # ── Build lookup ──────────────────────────────────────────────────────
     def get_max_build_number(self) -> int:
         """Return the highest buildNumber ever uploaded to this app in ASC
-        across TestFlight + App Store (all versionStrings).
+        across EVERY state — TestFlight beta (active + expired), App Store
+        production, in-review, withdrawn, rejected, prerelease — and EVERY
+        versionString.
 
-        ASC rejects a build whose ``version`` (build number) is <= any
-        previously uploaded build for the same app, so we treat this as the
-        source of truth for the next buildNumber to write into
-        ProjectSettings.asset. Absorbs drift from manual uploads, parallel
-        release branches, and CI post-build patchers.
+        ASC rejects a build whose ``version`` (buildNumber) is <= any
+        previously uploaded build under the same CFBundleShortVersionString,
+        AND fastlane's ``latest_testflight_build_number`` sees ALL TF builds
+        regardless of state. So we treat this "max across everything" as the
+        source of truth for the next buildNumber to inject into the trigger.
+
+        Absorbs drift from manual uploads, parallel release branches, and CI
+        post-build patchers. Fully paginated — the previous single-page probe
+        (max limit=200) undercounted apps with >200 TF builds and missed the
+        true max (real case: RopeAndDemolish returned 80 while fastlane saw 98).
         """
-        # Page through /v1/builds sorted by -version. Apple caps limit at 200
-        # per page; the first page's first row will be the max since we sort
-        # descending on version. But 'version' is a string that Apple sorts
-        # lexicographically ("10" < "9"), so we must fetch a batch and pick
-        # the numeric max ourselves.
         params = {
             "filter[app]": self.app_id,
-            "sort": "-uploadedDate",
             "limit": 200,
-            "fields[builds]": "version,uploadedDate",
+            "fields[builds]": "version,uploadedDate,expired,processingState",
+            # No filter[state] / filter[processingState] → returns every state.
+            # No sort filter → paginate the whole set; sorting is per-page anyway
+            # (version is a string; "9" > "11" lexicographic), so we compute the
+            # numeric max after collecting everything.
         }
-        resp = self._request("GET", "/v1/builds", params=params)
-        resp.raise_for_status()
-        builds = resp.json().get("data", [])
-        if not builds:
-            log.warning("ASC returned no builds for app %s — the app has never had an .ipa uploaded", self.app_id)
+        all_versions: List[int] = []
+        page_count = 0
+        total_rows = 0
+        next_path: Optional[str] = None
+        while True:
+            page_count += 1
+            if next_path is not None:
+                resp = self._request("GET", next_path)
+            else:
+                resp = self._request("GET", "/v1/builds", params=params)
+            resp.raise_for_status()
+            body = resp.json()
+            builds = body.get("data", [])
+            total_rows += len(builds)
+            for b in builds:
+                v = b.get("attributes", {}).get("version")
+                try:
+                    all_versions.append(int(v))
+                except (TypeError, ValueError):
+                    pass
+            # ASC pagination: links.next is a full URL — strip host to reuse _request
+            next_url = (body.get("links") or {}).get("next")
+            if not next_url:
+                break
+            next_path = next_url.replace(_API_BASE, "")
+            if page_count >= 100:
+                log.warning("ASC pagination hit 100-page safety cap (>20k builds) — may under-count")
+                break
+        if not all_versions:
+            log.warning("ASC returned no parseable numeric buildNumbers for app %s (%d rows / %d pages)",
+                        self.app_id, total_rows, page_count)
             return 0
-        numeric = []
-        for b in builds:
-            v = b.get("attributes", {}).get("version")
-            try:
-                numeric.append(int(v))
-            except (TypeError, ValueError):
-                pass
-        if not numeric:
-            log.warning("ASC returned %d builds but none had a parseable numeric build number", len(builds))
-            return 0
-        m = max(numeric)
-        log.info("ASC max build number across all versions = %d", m)
+        m = max(all_versions)
+        log.info("ASC max buildNumber across ALL states/versions = %d (scanned %d builds over %d pages)",
+                 m, total_rows, page_count)
         return m
 
     def get_max_version_string(self) -> str:
