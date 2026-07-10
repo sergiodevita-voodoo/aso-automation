@@ -490,10 +490,13 @@ def _run(args, cfg, log, state: _RunState) -> int:
         # log). The store-drift snap + optional Opus have already produced
         # the right values in next_state; inject_tunables tells the orb to
         # trust them.
+        # VGCI's check step reads the SHARED build_number tunable, not the
+        # platform-prefixed variants — feed it the Android versionCode
+        # (Int32-safe). iOS accepts the same value because we always bump the
+        # versionString, and ASC buildNumber uniqueness is per-versionString.
         tunables = circleci_trigger.VgciTrigger.build_inject_tunables(
             version_number=new_version,
-            ios_build_number=next_state.ios_build_number,
-            android_build_number=next_state.android_code,
+            build_number=next_state.android_code,
         )
         log.info("  inject_tunables: %s", tunables)
         vgci_pipeline = ci.trigger_build(
@@ -518,7 +521,14 @@ def _run(args, cfg, log, state: _RunState) -> int:
         common = {
             "repository_path": cfg.repo_url,
             "repository_branch": release_branch,
-            "build_number": str(next_state.ios_build_number),
+            # Use the Android versionCode (Int32-safe) for the shared
+            # build_number param. The deployer applies it to both platforms;
+            # iOS ASC accepts because each ASO release bumps the versionString
+            # and buildNumber uniqueness is per-versionString on iOS. Using
+            # the iOS value here caused Int32 overflow on the Android build
+            # when ASC's timestamp-format buildNumbers exceeded 2^31-1 (real
+            # case: DrawClimber, iOS max=202503062336).
+            "build_number": str(next_state.android_code),
             "project-version": new_version,
             "upload-comment": f"Monthly ASO update — {new_version}",
             "deployment-type": "release",
