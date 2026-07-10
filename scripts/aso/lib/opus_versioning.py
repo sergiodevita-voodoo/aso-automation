@@ -45,12 +45,16 @@ Rules of the road:
   ever uploaded to Play (across all tracks, including test tracks and archived).
 * Every new iOS buildNumber must be strictly greater than any value ever uploaded \
   to App Store Connect (across TestFlight and App Store).
-* The next bundleVersion (versionName / CFBundleShortVersionString) must be \
-  strictly greater than every version currently visible in either store, and \
-  should follow the game's actual shipping convention. Some games use semver \
-  (e.g. "5.21.12"), some ship a big monotonic integer as a major (e.g. "2140.0.2"), \
-  and one uses a plain integer ("96") in the repo but semver in the store — \
-  in that last case, keep the repo counter's own scheme.
+* iOS and Android may have INDEPENDENT version schemes. Look at what each \
+  store actually ships and mirror that store's own format:
+  - If ASC's max versionString is a monotonic integer (e.g. "109"), the next \
+    iOS versionString is the next integer (e.g. "110"). Do NOT introduce dots.
+  - If ASC's max versionString is semver (e.g. "5.21.9"), patch-bump it.
+  - Play's Android versionName follows the same detection rule independently.
+  Real case: RopeAndDemolish ships iOS as monotonic integer ("109" → "110") \
+  and Android as semver ("8.31.0" → "8.31.1"). Emitting the Android semver \
+  ("8.31.1") for iOS is REJECTED by Apple because "8" is parsed as integer \
+  and compared against the existing 109 → 8 < 109 → build stuck in processing.
 * Ignore free-form release-note annotations. "52100091 (5.21.9) - new VS 8.8.5" \
   means versionCode 52100091 and versionName 5.21.9; the "VS 8.8.5" is SDK \
   bundle info, not a version.
@@ -83,10 +87,11 @@ def _build_user_prompt(
         f"  max versionString: {asc_max_version_string}\n\n"
         f"Return ONLY this JSON, filled in:\n"
         f"{{\n"
-        f'  "bundle_version": "<X.Y.Z or the game\'s existing scheme>",\n'
+        f'  "bundle_version": "<Android versionName — follow Play\'s scheme, semver typical>",\n'
+        f'  "ios_version_string": "<iOS CFBundleShortVersionString — follow ASC\'s scheme; integer if ASC uses integers, semver otherwise>",\n'
         f'  "android_code": <int, > every code ever on Play>,\n'
         f'  "ios_build_number": <int, > every buildNumber ever on ASC>,\n'
-        f'  "reasoning": "<one-sentence explanation>"\n'
+        f'  "reasoning": "<one-sentence explanation covering both platforms>"\n'
         f"}}\n"
     )
 
@@ -160,9 +165,17 @@ def decide_next_state(
         log.warning("Opus versioning: response missing required fields (%s) — falling back to deterministic", e)
         return None
 
+    # Optional field — back-compat: if Opus doesn't emit it, iOS reuses bundle_version.
+    ios_ver = str(parsed.get("ios_version_string", "")).strip()
     reasoning = parsed.get("reasoning", "")
-    log.info("Opus versioning: %s → code=%d ios=#%d  (reason: %s)", bv, ac, ib, reasoning)
-    return unity_settings.VersionState(bundle_version=bv, android_code=ac, ios_build_number=ib)
+    log.info("Opus versioning: android=%s ios=%s → code=%d ios=#%d  (reason: %s)",
+             bv, ios_ver or bv, ac, ib, reasoning)
+    return unity_settings.VersionState(
+        bundle_version=bv,
+        android_code=ac,
+        ios_build_number=ib,
+        ios_version_string=ios_ver,
+    )
 
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
