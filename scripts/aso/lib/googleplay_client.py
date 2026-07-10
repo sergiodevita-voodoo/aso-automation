@@ -81,30 +81,79 @@ class GooglePlayClient:
 
     # ── Internal → Production promotion ───────────────────────────────────
     def get_max_version_code(self, edit_id: str) -> int:
-        """Return the highest AAB versionCode ever uploaded across ALL tracks
-        (production, beta, alpha, internal, plus any custom closed tracks).
+        """Return the highest AAB versionCode across EVERYTHING Play knows about:
+        - Every track (production, beta, alpha, internal, custom closed testing)
+          — every release inside every track (active, draft, superseded)
+        - Every uploaded bundle (edits.bundles.list) — catches AABs uploaded
+          but never assigned to a track's release
+        - Every uploaded apk (edits.apks.list) — for legacy games still on APKs
 
         Play rejects an AAB whose versionCode is <= any previously uploaded
-        code, so we use this as the source of truth for the next code to write
-        into ProjectSettings.asset. Any drift between develop's local counter
-        and what's on Play (from manual uploads, CI post-build patchers,
-        parallel release branches, or hotfixes) is transparently absorbed.
+        code, so we use this maximum as the source of truth for the next code.
+        Any drift between develop's local counter and Play (manual uploads,
+        parallel release branches, CI post-build patchers, hotfixes) is
+        transparently absorbed.
         """
         client = self._client()
-        tracks = client.edits().tracks().list(packageName=self.package_name, editId=edit_id).execute().get("tracks", [])
         codes: List[int] = []
-        for t in tracks:
-            for r in t.get("releases", []):
-                for c in (r.get("versionCodes") or []):
-                    try:
-                        codes.append(int(c))
-                    except (TypeError, ValueError):
-                        pass
+        source_counts = {"tracks": 0, "bundles": 0, "apks": 0}
+
+        # 1. All tracks × all releases × all versionCodes
+        try:
+            tracks = client.edits().tracks().list(
+                packageName=self.package_name, editId=edit_id,
+            ).execute().get("tracks", [])
+            for t in tracks:
+                for r in t.get("releases", []):
+                    for c in (r.get("versionCodes") or []):
+                        try:
+                            codes.append(int(c))
+                            source_counts["tracks"] += 1
+                        except (TypeError, ValueError):
+                            pass
+        except Exception as e:
+            log.warning("Play tracks.list probe failed: %s", e)
+
+        # 2. All uploaded bundles — includes ones not (yet) assigned to a release
+        try:
+            bundles = client.edits().bundles().list(
+                packageName=self.package_name, editId=edit_id,
+            ).execute().get("bundles", [])
+            for b in bundles:
+                vc = b.get("versionCode")
+                try:
+                    codes.append(int(vc))
+                    source_counts["bundles"] += 1
+                except (TypeError, ValueError):
+                    pass
+        except HttpError as e:
+            log.debug("Play bundles.list probe returned %s — likely APK-only app", e.resp.status)
+        except Exception as e:
+            log.warning("Play bundles.list probe failed: %s", e)
+
+        # 3. All uploaded APKs — for legacy APK-only apps
+        try:
+            apks = client.edits().apks().list(
+                packageName=self.package_name, editId=edit_id,
+            ).execute().get("apks", [])
+            for a in apks:
+                vc = a.get("versionCode")
+                try:
+                    codes.append(int(vc))
+                    source_counts["apks"] += 1
+                except (TypeError, ValueError):
+                    pass
+        except HttpError as e:
+            log.debug("Play apks.list probe returned %s — likely AAB-only app", e.resp.status)
+        except Exception as e:
+            log.warning("Play apks.list probe failed: %s", e)
+
         if not codes:
-            log.warning("Play returned no versionCodes across any track — the app has never had an AAB uploaded")
+            log.warning("Play returned no versionCodes across tracks/bundles/apks — app has never had an AAB/APK uploaded")
             return 0
         m = max(codes)
-        log.info("Play max versionCode across all tracks = %d", m)
+        log.info("Play max versionCode across ALL tracks/bundles/apks = %d (samples: tracks=%d bundles=%d apks=%d)",
+                 m, source_counts["tracks"], source_counts["bundles"], source_counts["apks"])
         return m
 
     def get_max_version_name(self, edit_id: str) -> str:
