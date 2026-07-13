@@ -584,10 +584,26 @@ def _run(args, cfg, log, state: _RunState) -> int:
         state.ios_pipeline_id = ios_pipeline
         android_pipeline = ci.trigger_android(android_common, cfg.android_package_name, cfg.build["android_keystore_name"])
         state.android_pipeline_id = android_pipeline
+        # Poll iOS first, then Android. If EITHER wait raises we cancel the
+        # sibling pipeline before propagating so the other platform doesn't
+        # keep building and deploy to Play Internal / TestFlight while the
+        # run has already failed. Prevents asymmetric-ship outcomes like
+        # Woodturning 2026-07-13 (iOS Unity-404 fail while Android kept
+        # building + deployed to Play Internal independently).
         log.info("[7/10] Waiting for iOS pipeline %s", ios_pipeline)
-        ci.wait_for_pipeline(ios_pipeline)
+        try:
+            ci.wait_for_pipeline(ios_pipeline)
+        except Exception:
+            log.warning("[7/10] iOS pipeline raised — cancelling sibling Android pipeline %s before rolling back", android_pipeline)
+            ci.cancel_pipeline(android_pipeline)
+            raise
         log.info("[7/10] Waiting for Android pipeline %s", android_pipeline)
-        ci.wait_for_pipeline(android_pipeline)
+        try:
+            ci.wait_for_pipeline(android_pipeline)
+        except Exception:
+            log.warning("[7/10] Android pipeline raised — cancelling sibling iOS pipeline %s (usually already terminal) before rolling back", ios_pipeline)
+            ci.cancel_pipeline(ios_pipeline)
+            raise
 
     # ─── SMOKE-TEST short-circuit ─────────────────────────────────────────
     # If --smoke-test was passed, we've validated push + CI + upload to

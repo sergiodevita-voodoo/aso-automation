@@ -280,11 +280,15 @@ class AppStoreConnectClient:
         log.info("ASC max versionString (legacy path) across all versions = %r", best)
         return best
 
-    def find_build(self, version_string: str, build_number: str, poll_timeout_minutes: int = 60, poll_interval_seconds: int = 60) -> str:
+    def find_build(self, version_string: str, build_number: str, poll_timeout_minutes: int = 120, poll_interval_seconds: int = 60) -> str:
         """Poll until the matching uploaded build is visible in ASC, returns its build id.
 
         After CircleCI uploads an .ipa to TestFlight, Apple typically takes
-        5–15 min to process it before it's queryable via the API.
+        5–15 min to process it before it's queryable via the API — but
+        during traffic spikes (Apple events, monthly-batch ASO waves)
+        processing can take 60–90 min. Timeout bumped from 60→120 min after
+        the 2026-07-13 wave hit 6 games at exactly the 60-min mark while
+        builds were still processing.
         """
         deadline = time.monotonic() + (poll_timeout_minutes * 60)
         params = {

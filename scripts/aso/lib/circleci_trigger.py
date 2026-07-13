@@ -86,6 +86,43 @@ class _BaseTrigger:
             return "success"
         return "running"
 
+    def cancel_pipeline(self, pipeline_id: str) -> None:
+        """Best-effort cancel of every non-terminal workflow on a pipeline.
+
+        Used by the orchestrator when the sibling platform's pipeline fails —
+        we don't want the other platform to keep building (and potentially
+        deploying to Play Internal / TestFlight) after the run has already
+        raised. Failures are swallowed and logged: this is defensive cleanup,
+        not a critical operation.
+        """
+        try:
+            url = f"{_CIRCLECI_BASE}/pipeline/{pipeline_id}/workflow"
+            resp = requests.get(url, headers={"Circle-Token": self.token}, timeout=30)
+            resp.raise_for_status()
+            wfs = resp.json().get("items", [])
+        except Exception as e:
+            log.warning("cancel_pipeline: could not list workflows for %s: %s", pipeline_id, e)
+            return
+        non_terminal = {"running", "on_hold", "failing"}
+        cancelled = 0
+        for w in wfs:
+            if w.get("status") not in non_terminal:
+                continue
+            try:
+                r = requests.post(
+                    f"{_CIRCLECI_BASE}/workflow/{w['id']}/cancel",
+                    headers={"Circle-Token": self.token}, timeout=30,
+                )
+                if r.status_code in (200, 202):
+                    cancelled += 1
+                    log.info("cancel_pipeline: cancelled workflow %s (name=%s)", w["id"], w.get("name"))
+                else:
+                    log.warning("cancel_pipeline: workflow %s cancel returned %s: %s",
+                                w["id"], r.status_code, r.text[:200])
+            except Exception as e:
+                log.warning("cancel_pipeline: workflow %s cancel failed: %s", w["id"], e)
+        log.info("cancel_pipeline: pipeline %s — cancelled %d workflow(s)", pipeline_id, cancelled)
+
     @retry(stop=stop_after_attempt(5), wait=wait_exponential(min=2, max=20))
     def _post_pipeline(self, project_slug: str, branch: str, parameters: Dict[str, Any]) -> str:
         url = f"{_CIRCLECI_BASE}/project/{project_slug}/pipeline"
