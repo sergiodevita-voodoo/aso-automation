@@ -641,16 +641,18 @@ def _run(args, cfg, log, state: _RunState) -> int:
             poll_timeout_minutes=cfg.build.get("poll_timeout_minutes", 180),
         )
         # Base params shared by both platform triggers.
+        # NOTE: build_number is intentionally NOT in this dict — it must be
+        # per-platform. iOS gets next_state.ios_build_number (any size, Apple
+        # accepts because buildNumber uniqueness is per-versionString on
+        # ASC). Android gets next_state.android_code (Int32, monotonic).
+        # Sharing a single value here previously caused CrowdCity /
+        # DrawClimber / Jump-Dunk-3D / RopeAndDemolish to time out at Step 8:
+        # CI uploaded iOS with android_code as buildNumber, but Step 8's
+        # find_build searched for next_state.ios_build_number → mismatch →
+        # 120-min timeout.
         base_common = {
             "repository_path": cfg.repo_url,
             "repository_branch": release_branch,
-            # Use the Android versionCode (Int32-safe) for the shared
-            # build_number param. iOS ASC accepts because each ASO release
-            # bumps the versionString and buildNumber uniqueness is
-            # per-versionString on iOS. Using the iOS value here would
-            # overflow Android's Int32 versionCode when ASC uses
-            # timestamp-format buildNumbers (real case: DrawClimber).
-            "build_number": str(next_state.android_code),
             "upload-comment": f"Monthly ASO update — {new_version}",
             "deployment-type": "release",
             "deploy-build-to-store": cfg.build["deploy_to_store"],
@@ -667,9 +669,17 @@ def _run(args, cfg, log, state: _RunState) -> int:
         if ios_next_version != new_version:
             log.info("  Per-platform version-string split: iOS='%s'  Android='%s'",
                      ios_next_version, new_version)
-        ios_pipeline = ci.trigger_ios(ios_common, cfg.ios_bundle_id)
+        # Per-platform build_number — see VsCiDeployerTrigger docstrings.
+        # iOS: next_state.ios_build_number (any size, ASC scoping is per-versionString).
+        # Android: next_state.android_code (Int32-safe, monotonic per Play).
+        log.info("  Per-platform build_number: iOS=%s  Android=%s",
+                 next_state.ios_build_number, next_state.android_code)
+        ios_pipeline = ci.trigger_ios(ios_common, cfg.ios_bundle_id,
+                                       build_number=str(next_state.ios_build_number))
         state.ios_pipeline_id = ios_pipeline
-        android_pipeline = ci.trigger_android(android_common, cfg.android_package_name, cfg.build["android_keystore_name"])
+        android_pipeline = ci.trigger_android(android_common, cfg.android_package_name,
+                                              cfg.build["android_keystore_name"],
+                                              build_number=str(next_state.android_code))
         state.android_pipeline_id = android_pipeline
         # Poll iOS first, then Android. If EITHER wait raises we cancel the
         # sibling pipeline before propagating so the other platform doesn't

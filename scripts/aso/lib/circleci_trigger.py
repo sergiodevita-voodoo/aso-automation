@@ -149,9 +149,20 @@ class VsCiDeployerTrigger(_BaseTrigger):
     project_slug: str = "gh/VoodooTeam/vs-ci-deployer"
     deployer_config_branch: str = ""    # e.g. "feature/GameName_6000.0.72f1"
 
-    def trigger_ios(self, common: Dict[str, Any], bundle_id: str) -> str:
+    def trigger_ios(self, common: Dict[str, Any], bundle_id: str, build_number: str) -> str:
+        """Trigger the iOS build pipeline on vs-ci-deployer.
+
+        ``build_number`` is the iOS CFBundleVersion (uniqueness scoped
+        per-versionString by ASC). Fastlane accepts our value as long as it
+        is > current ASC max for the given versionString; otherwise it uses
+        ASC max + 1 and our value is ignored. Step 8's find_build looks for
+        the value we pass here, so it must reflect what CI will actually
+        upload — that's why iOS gets its own ``build_number``, distinct from
+        Android's Int32 versionCode.
+        """
         params = {
             **common,
+            "build_number": build_number,
             "repository_bundle_id": bundle_id,
             "manual-trigger-ios": True,
             "manual-trigger-ios-testflight": True,
@@ -159,9 +170,19 @@ class VsCiDeployerTrigger(_BaseTrigger):
         }
         return self._post_pipeline(self.project_slug, self.deployer_config_branch, params)
 
-    def trigger_android(self, common: Dict[str, Any], package_name: str, keystore: str) -> str:
+    def trigger_android(self, common: Dict[str, Any], package_name: str, keystore: str, build_number: str) -> str:
+        """Trigger the Android build pipeline on vs-ci-deployer.
+
+        ``build_number`` is the Android versionCode (Int32, monotonically
+        increasing per Play requirements). Must not exceed 2^31-1
+        (=2,147,483,647) or the Play Store upload rejects with
+        NumberFormatException. iOS's timestamp-format buildNumbers (e.g.
+        202503062339) would overflow — so iOS and Android MUST carry their
+        own build_number values.
+        """
         params = {
             **common,
+            "build_number": build_number,
             "repository_bundle_id": package_name,
             "manual-trigger-android-deployment": True,
             "android-keystore": keystore,
