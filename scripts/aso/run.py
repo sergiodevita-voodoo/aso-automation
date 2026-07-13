@@ -715,35 +715,56 @@ def _run(args, cfg, log, state: _RunState) -> int:
         return 0
 
     # ─── Step 8: ASC version + What's New ──────────────────────────────────
-    log.info("[8/10] App Store Connect — version + What's New")
+    # Sub-step logging + eager flush — Woodturning 2026-07-13 wave 2 died
+    # silently here with the GH runner marked completed/failure but the step
+    # showing in_progress with no log output. Verbose sub-step logs give us
+    # a last-known-position if the runner is killed again.
+    def _flush():
+        try: sys.stdout.flush(); sys.stderr.flush()
+        except Exception: pass
+    log.info("[8/10] App Store Connect — version + What's New"); _flush()
+    log.info("[8/10a] Initialising ASC client (app_id=%s)", cfg.apple_app_id); _flush()
     asc = appstoreconnect_client.AppStoreConnectClient(
         key_id=config.secret(cfg.secret_names["asc_key_id"]),
         private_key_p8=config.secret(cfg.secret_names["asc_private_key_p8"]),
         app_id=cfg.apple_app_id,
     )
+    log.info("[8/10b] find_build → version=%s buildNumber=%s (timeout 120min)",
+             new_version, next_state.ios_build_number); _flush()
     build_id = asc.find_build(version_string=new_version, build_number=str(next_state.ios_build_number))
     state.ios_build_id = build_id
+    log.info("[8/10c] Build id = %s — creating appStoreVersion", build_id); _flush()
     version_id = asc.create_version(new_version, platform="IOS")
     state.asc_version_id = version_id
+    log.info("[8/10d] Version id = %s — attaching build", version_id); _flush()
     asc.attach_build(version_id, build_id)
     state.asc_attached_build_id = build_id
+    log.info("[8/10e] Build attached — listing localizations"); _flush()
     locales_ios = [l["attributes"]["locale"] for l in asc.list_localizations(version_id)]
+    log.info("[8/10f] iOS locales: %s — generating What's New", locales_ios); _flush()
     notes = text_generator.generate_per_locale(cfg.aso_content, locales_ios, repo_root=repo_root)
+    log.info("[8/10g] What's New generated (%d locales) — setting on each", len(notes)); _flush()
     for loc_obj in asc.list_localizations(version_id):
         locale = loc_obj["attributes"]["locale"]
         asc.set_whats_new(loc_obj["id"], notes[locale])
+        _flush()
+    log.info("[8/10h] Submitting for review"); _flush()
     state.asc_submission_id = asc.submit_for_review(version_id)
+    log.info("[8/10i] Submitted — submission id = %s", state.asc_submission_id); _flush()
 
     # ─── Step 9: Google Play — promote Internal → Production ───────────────
     # CircleCI only uploads the AAB to the Internal track. This step reads
     # that AAB's versionCodes and creates a Production release containing
     # them with the new release notes + 100% rollout, then commits.
-    log.info("[9/10] Google Play — promote Internal → Production")
+    log.info("[9/10] Google Play — promote Internal → Production"); _flush()
+    log.info("[9/10a] Initialising Play client (pkg=%s)", cfg.android_package_name); _flush()
     play = googleplay_client.GooglePlayClient(
         sa_json=config.secret(cfg.secret_names["google_play_sa_json"]),
         package_name=cfg.android_package_name,
     )
+    log.info("[9/10b] Opening Play edit"); _flush()
     edit_id = play.open_edit()
+    log.info("[9/10c] Edit id = %s — reading Internal track", edit_id); _flush()
     try:
         version_codes = play.get_latest_internal_version_codes(edit_id)
         locales_play = play.list_listings_locales(edit_id)
