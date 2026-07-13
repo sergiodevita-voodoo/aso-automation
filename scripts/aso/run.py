@@ -220,6 +220,50 @@ def _run(args, cfg, log, state: _RunState) -> int:
         base=cfg.integration_branch,
     )
 
+    # ─── Step 1.5: RULE #4 — Recent-activity guardrail ─────────────────────
+    # If the game has recent human commits on the integration branch, or a
+    # recent build has been uploaded to any store track, DON'T push a new
+    # release: fall back to icon-only mode. Regenerate + push the icon to
+    # integration branch and develop, then STOP before touching stores.
+    # Reason: the monthly icon refresh must not step on an active release
+    # cycle (hotfix in flight, pending review, mid-QA, etc.).
+    from scripts.aso.lib import activity_probe
+    guard_days = cfg.activity_guard_days
+    icon_only_mode = False
+    if guard_days > 0:
+        log.info("[1.5/10] Recent-activity guardrail — checking %d-day window", guard_days)
+        try:
+            _asc_probe_client = appstoreconnect_client.AppStoreConnectClient(
+                key_id=config.secret(cfg.secret_names["asc_key_id"]),
+                private_key_p8=config.secret(cfg.secret_names["asc_private_key_p8"]),
+                app_id=cfg.apple_app_id,
+            )
+        except Exception as e:
+            log.warning("  ASC probe client init failed: %s — skipping ASC probe", e)
+            _asc_probe_client = None
+        try:
+            _play_probe_client = googleplay_client.GooglePlayClient(
+                sa_json=config.secret(cfg.secret_names["google_play_sa_json"]),
+                package_name=cfg.android_package_name,
+            )
+        except Exception as e:
+            log.warning("  Play probe client init failed: %s — skipping Play probe", e)
+            _play_probe_client = None
+        signals = activity_probe.has_recent_activity(
+            cfg=cfg, repo_root=repo_root, days=guard_days,
+            asc_client=_asc_probe_client, play_client=_play_probe_client,
+        )
+        if signals:
+            icon_only_mode = True
+            log.warning("[1.5/10] Recent activity detected within %d days — SWITCHING TO ICON-ONLY MODE", guard_days)
+            log.warning("[1.5/10] Signals:\n%s", activity_probe.format_signals(signals))
+            log.warning("[1.5/10] Will regenerate icon, push to release branch, merge to %s + develop, then STOP.", cfg.integration_branch)
+            log.warning("[1.5/10] No version bump, no CI, no ASC submit, no Play promote.")
+        else:
+            log.info("[1.5/10] No recent activity — proceeding with full ASO run.")
+    else:
+        log.info("[1.5/10] Activity guard disabled (activity_guard_days=0) — proceeding with full ASO run.")
+
     # ─── Step 2: version bump (now reading develop's actual state) ─────────
     log.info("[2/10] Version bump (read from %s)", cfg.integration_branch)
     current_state = unity_settings.read_current(cfg.project_settings_file)
@@ -232,6 +276,10 @@ def _run(args, cfg, log, state: _RunState) -> int:
     # and a reasoning line. Falls back to deterministic on any Opus failure.
     strategy = str(cfg.raw.get("versioning", {}).get("strategy", "deterministic")).lower()
     opus_won = False
+    # In icon-only mode we don't ship anything, so version-bump work is skipped.
+    if icon_only_mode:
+        strategy = "skipped"
+        log.info("  icon-only mode — skipping version bump (Opus + deterministic snap)")
     if strategy == "opus":
         from scripts.aso.lib import opus_versioning
         log.info("  versioning.strategy = opus — asking Opus for next version identifiers")
@@ -297,8 +345,10 @@ def _run(args, cfg, log, state: _RunState) -> int:
     _play_edit = None
     if opus_won:
         log.info("  Opus versioning decided the numbers — skipping deterministic store snaps")
+    if icon_only_mode:
+        log.info("  icon-only mode — skipping deterministic Play + ASC snaps")
     try:
-        if opus_won:
+        if opus_won or icon_only_mode:
             raise _SkipDeterministic()
         _play_client = googleplay_client.GooglePlayClient(
             sa_json=config.secret(cfg.secret_names["google_play_sa_json"]),
@@ -345,7 +395,7 @@ def _run(args, cfg, log, state: _RunState) -> int:
 
     _asc_client = None
     try:
-        if opus_won:
+        if opus_won or icon_only_mode:
             raise _SkipDeterministic()
         _asc_client = appstoreconnect_client.AppStoreConnectClient(
             key_id=config.secret(cfg.secret_names["asc_key_id"]),
@@ -434,18 +484,22 @@ def _run(args, cfg, log, state: _RunState) -> int:
     # `release/1.9.15` (which already exists on origin from the prior real
     # release) → non-fast-forward, or land the new commit under the wrong
     # release name. Rename the local branch to match the final version.
-    expected_branch = cfg.release_branch_pattern.format(version=new_version)
-    if release_branch != expected_branch:
-        log.info("  Store-drift snap bumped version — renaming release branch %s → %s",
-                 release_branch, expected_branch)
-        subprocess.run(["git", "branch", "-m", release_branch, expected_branch],
-                       cwd=repo_root, check=True)
-        release_branch = expected_branch
-        state.release_branch = release_branch
+    if not icon_only_mode:
+        expected_branch = cfg.release_branch_pattern.format(version=new_version)
+        if release_branch != expected_branch:
+            log.info("  Store-drift snap bumped version — renaming release branch %s → %s",
+                     release_branch, expected_branch)
+            subprocess.run(["git", "branch", "-m", release_branch, expected_branch],
+                           cwd=repo_root, check=True)
+            release_branch = expected_branch
+            state.release_branch = release_branch
 
     # ─── Step 3: write new ProjectSettings ─────────────────────────────────
-    log.info("[3/10] Patch ProjectSettings.asset")
-    unity_settings.write(cfg.project_settings_file, next_state)
+    if icon_only_mode:
+        log.info("[3/10] SKIPPED — icon-only mode (ProjectSettings.asset not patched)")
+    else:
+        log.info("[3/10] Patch ProjectSettings.asset")
+        unity_settings.write(cfg.project_settings_file, next_state)
 
     # ─── Step 4: Scenario workflow ─────────────────────────────────────────
     # Mirrors what Sergio's icons_DribbleHoops workflow does in the Scenario
@@ -479,16 +533,27 @@ def _run(args, cfg, log, state: _RunState) -> int:
 
     # ─── Step 6: commit ────────────────────────────────────────────────────
     log.info("[6/10] Commit changes")
-    commit_msg = (
-        f"{cfg.commit_prefix} Monthly ASO update — {new_version}\n\n"
-        f"• Icon refreshed via Scenario workflow {cfg.scenario['workflow_id']}\n"
-        f"• Version bumped: {current_state.bundle_version} → {new_version}\n"
-        f"• Android build code: {current_state.android_code} → {next_state.android_code}\n"
-        f"• iOS build number: {current_state.ios_build_number} → {next_state.ios_build_number}\n"
-    )
+    if icon_only_mode:
+        commit_msg = (
+            f"{cfg.commit_prefix} Monthly ASO icon refresh (icon-only)\n\n"
+            f"• Icon refreshed via Scenario workflow {cfg.scenario['workflow_id']}\n"
+            f"• No version bump — recent-activity guard fired (last {cfg.activity_guard_days}d)\n"
+            f"• No CI, no ASC submit, no Play promote\n"
+        )
+        # Stage only the icon files — ProjectSettings.asset wasn't modified
+        stage_paths = list(written_paths)
+    else:
+        commit_msg = (
+            f"{cfg.commit_prefix} Monthly ASO update — {new_version}\n\n"
+            f"• Icon refreshed via Scenario workflow {cfg.scenario['workflow_id']}\n"
+            f"• Version bumped: {current_state.bundle_version} → {new_version}\n"
+            f"• Android build code: {current_state.android_code} → {next_state.android_code}\n"
+            f"• iOS build number: {current_state.ios_build_number} → {next_state.ios_build_number}\n"
+        )
+        stage_paths = [*written_paths, cfg.project_settings_file]
     git_ops.stage_and_commit(
         repo_root,
-        paths=[*written_paths, cfg.project_settings_file],
+        paths=stage_paths,
         commit_message=commit_msg,
     )
 
@@ -498,6 +563,28 @@ def _run(args, cfg, log, state: _RunState) -> int:
 
     git_ops.push_branch(repo_root, release_branch)
     state.release_branch_pushed = release_branch
+
+    # ─── Rule #4 short-circuit ─────────────────────────────────────────────
+    # Icon-only mode: merge the branch back into integration + develop and
+    # stop. No CI, no store side-effects. The new icon is on the codebase;
+    # the next non-icon-only run will pick up any store changes made by
+    # whoever was working on the game.
+    if icon_only_mode:
+        merge_targets = [cfg.integration_branch]
+        if cfg.integration_branch != "develop":
+            merge_targets.append("develop")
+        log.info("[10/10] Icon-only mode — merging %s back into %s", release_branch, " + ".join(merge_targets))
+        try:
+            git_ops.merge_release_back(
+                repo_root,
+                release_branch=release_branch,
+                targets=merge_targets,
+            )
+            git_ops.delete_branch(repo_root, release_branch)
+        except Exception as e:
+            log.warning("Icon-only merge-back failed: %s — release branch %s left on origin for manual review", e, release_branch)
+        log.info("✅ ASO icon-only refresh complete for %s — no version bump, no store push.", cfg.game_name)
+        return 0
 
     # ─── Step 7: CircleCI build ────────────────────────────────────────────
     # Provider dispatch:

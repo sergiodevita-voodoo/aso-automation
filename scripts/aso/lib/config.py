@@ -55,6 +55,21 @@ class Config:
         return self.raw["game"]["ticket_placeholder"]
 
     @property
+    def activity_guard_days(self) -> int:
+        """How many days of recency count as "recent activity" for rule #4.
+
+        If any store track or human commit has been touched within this window,
+        the automation falls back to icon-only mode (regenerate + push icon to
+        integration branch + develop, skip all store side-effects).
+
+        Default 7 days. Override with ``build.activity_guard_days`` in the
+        per-game config to widen (e.g. 14) or narrow (e.g. 3) the window.
+        Set to 0 to disable the guard entirely (not recommended — original
+        2026-07-13 wave issue would recur).
+        """
+        return int(self.raw.get("build", {}).get("activity_guard_days", 7))
+
+    @property
     def ios_bundle_id(self) -> str:
         return self.raw["stores"]["ios"]["bundle_id"]
 
