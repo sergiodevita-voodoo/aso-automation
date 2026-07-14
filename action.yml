@@ -1,5 +1,5 @@
-name: 'PGT ASO Monthly Automation'
-description: 'Monthly ASO automation for PGT games — fresh icon (Scenario workflow) + What''s New (Claude) → App Store + Google Play, with auto-rollback on failure.'
+name: 'PGT ASO Biweekly Automation'
+description: 'Biweekly ASO automation for PGT games (runs 1st + 15th of each month) — fresh icon (Scenario workflow) + What''s New (Claude) → App Store + Google Play, with auto-rollback on failure.'
 author: 'Voodoo / PGT'
 
 inputs:
