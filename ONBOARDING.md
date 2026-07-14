@@ -86,9 +86,9 @@ Key per-game values:
 | `build.android_keystore_name` | From the CC context's env vars |
 | `notifications.slack_channel` | `#pgt-<game-slug>` |
 
-### 2. Add `.github/workflows/aso-monthly.yml`
+### 2. Add `.github/workflows/aso-biweekly.yml`
 
-Copy [`templates/aso-monthly.yml.template`](./templates/aso-monthly.yml.template),
+Copy [`templates/aso-biweekly.yml.template`](./templates/aso-biweekly.yml.template),
 substitute `{{game_name}}` in the description.
 
 ### 3. Set up `develop` branch if absent
@@ -100,7 +100,7 @@ branch protection so direct pushes work for the automation.
 ### 4. Sanity smoke test
 
 ```bash
-gh workflow run aso-monthly.yml --repo VoodooStudios/<RepoName> --ref develop -f dry_run=true
+gh workflow run aso-biweekly.yml --repo VoodooStudios/<RepoName> --ref develop -f dry_run=true
 ```
 
 A dry-run skips the push/CI/store steps but runs Scenario + Claude.
@@ -110,17 +110,17 @@ config before the first real run.
 ### 5. First real run
 
 ```bash
-gh workflow run aso-monthly.yml --repo VoodooStudios/<RepoName> --ref develop -f dry_run=false
+gh workflow run aso-biweekly.yml --repo VoodooStudios/<RepoName> --ref develop -f dry_run=false
 ```
 
-Or wait for the monthly cron (`0 9 1 * *` UTC).
+Or wait for the biweekly cron (`0 9 1,15 * *` UTC).
 
 ---
 
 ## Verification checklist after onboarding
 
 - [ ] `aso-automation.config.yml` exists on `develop`
-- [ ] `.github/workflows/aso-monthly.yml` exists on `develop`
+- [ ] `.github/workflows/aso-biweekly.yml` exists on `develop`
 - [ ] Workflow appears in `gh workflow list --repo VoodooStudios/<game>`
 - [ ] 6 org secrets visible as `Inherited from organization` in the game repo's Secrets tab
 - [ ] PubOps confirms Play SA granted
